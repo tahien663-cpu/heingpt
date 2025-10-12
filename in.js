@@ -701,12 +701,12 @@ client.once('ready', async () => {
     
     // Set status rotation
     const statuses = [
-      { name: '/help | AI Assistant', type: ActivityType.Playing },
+      { name: 'HeinAI', type: ActivityType.Playing },
       { name: `${client.guilds.cache.size} servers`, type: ActivityType.Watching },
-      { name: 'OpenRouter API', type: ActivityType.Listening },
-      { name: '🎨 Image Generation', type: ActivityType.Playing },
+      { name: 'Xem sex', type: ActivityType.Listening },
+      { name: 'Best AI', type: ActivityType.Playing },
       { name: '🎮 Games Available', type: ActivityType.Playing },
-      { name: `🌐 Web: http://localhost:${WEB_PORT}`, type: ActivityType.Watching }
+      { name: `Hello`, type: ActivityType.Watching }
     ];
     
     let currentStatus = 0;
