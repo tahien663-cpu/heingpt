@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Status - <%= botName %></title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #dcddde;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 30px;
+            background: rgba(47, 49, 54, 0.9);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #7289da;
+            margin: 0;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        .uptime {
+            font-size: 1.2em;
+            color: #43b581;
+            margin-top: 10px;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: rgba(47, 49, 54, 0.9);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+        }
+        .card h2 {
+            color: #7289da;
+            margin-top: 0;
+            border-bottom: 2px solid #42454a;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            transition: background 0.3s ease;
+        }
+        .stat-item:hover {
+            background: rgba(0, 0, 0, 0.3);
+        }
+        .stat-label {
+            font-weight: 500;
+            color: #b9bbbe;
+        }
+        .stat-value {
+            font-weight: bold;
+            color: #43b581;
+            font-size: 1.1em;
+        }
+        .stat-value.error {
+            color: #f04747;
+        }
+        .refresh-btn {
+            background: linear-gradient(135deg, #7289da 0%, #5a6eb8 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 18px;
+            font-weight: bold;
+            display: block;
+            margin: 40px auto;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(114, 137, 218, 0.4);
+        }
+        .refresh-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(114, 137, 218, 0.6);
+        }
+        .refresh-btn:active {
+            transform: translateY(0);
+        }
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding: 20px;
+            background: rgba(47, 49, 54, 0.9);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+        .command-list {
+            max-height: 350px;
+            overflow-y: auto;
+            padding-right: 10px;
+        }
+        .command-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        .command-list::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+        }
+        .command-list::-webkit-scrollbar-thumb {
+            background: #7289da;
+            border-radius: 4px;
+        }
+        .command-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+        .command-item:hover {
+            background: rgba(114, 137, 218, 0.2);
+            transform: translateX(5px);
+        }
+        .command-name {
+            color: #fff;
+            font-weight: 500;
+        }
+        .command-count {
+            color: #43b581;
+            font-weight: bold;
+            background: rgba(67, 181, 129, 0.2);
+            padding: 2px 8px;
+            border-radius: 12px;
+        }
+        .api-info {
+            background: rgba(47, 49, 54, 0.9);
+            border-radius: 15px;
+            padding: 20px;
+            margin-top: 30px;
+            text-align: center;
+        }
+        .api-link {
+            color: #7289da;
+            text-decoration: none;
+            font-weight: bold;
+            transition: color 0.3s ease;
+        }
+        .api-link:hover {
+            color: #5a6eb8;
+            text-decoration: underline;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        .live-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #43b581;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: pulse 2s infinite;
+        }
+    </style>
+    <script>
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            location.reload();
+        }, 30000);
+        
+        // Manual refresh with animation
+        function refreshPage() {
+            document.body.style.opacity = '0.5';
+            setTimeout(() => {
+                location.reload();
+            }, 300);
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><%= botName %> Status <span class="live-indicator"></span></h1>
+            <div class="uptime">⏱️ Uptime: <%= uptime %></div>
+        </header>
+        
+        <div class="status-grid">
+            <div class="card">
+                <h2>🤖 Bot Information</h2>
+                <div class="stat-item">
+                    <span class="stat-label">📚 Servers</span>
+                    <span class="stat-value"><%= servers %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">👥 Users</span>
+                    <span class="stat-value"><%= users %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">🎮 Active Games</span>
+                    <span class="stat-value"><%= activeGames %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">💬 Conversations</span>
+                    <span class="stat-value"><%= conversationHistory %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">👤 User Profiles</span>
+                    <span class="stat-value"><%= userProfiles %></span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>📊 Statistics</h2>
+                <div class="stat-item">
+                    <span class="stat-label">💬 Messages</span>
+                    <span class="stat-value"><%= stats.messagesProcessed.toLocaleString() %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">🎨 Images</span>
+                    <span class="stat-value"><%= stats.imagesGenerated.toLocaleString() %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">⚡ Commands</span>
+                    <span class="stat-value"><%= stats.commandsUsed.toLocaleString() %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">🌤️ Weather</span>
+                    <span class="stat-value"><%= stats.weatherQueries.toLocaleString() %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">🎮 Games</span>
+                    <span class="stat-value"><%= stats.gamesPlayed.toLocaleString() %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">❌ Errors</span>
+                    <span class="stat-value error"><%= stats.errors.toLocaleString() %></span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>🤖 AI Models</h2>
+                <div class="stat-item">
+                    <span class="stat-label">Chat Model</span>
+                    <span class="stat-value"><%= model %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Image Model</span>
+                    <span class="stat-value"><%= imageModel %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Model Switches</span>
+                    <span class="stat-value"><%= stats.modelSwitches %></span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Personality Changes</span>
+                    <span class="stat-value"><%= stats.personalityChanges %></span>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>⚡ Command Usage</h2>
+                <div class="command-list">
+                    <% if (Object.keys(commands).length > 0) { %>
+                        <% for (const [command, count] of Object.entries(commands)) { %>
+                            <div class="command-item">
+                                <span class="command-name">/<%= command %></span>
+                                <span class="command-count"><%= count.toLocaleString() %></span>
+                            </div>
+                        <% } %>
+                    <% } else { %>
+                        <div style="text-align: center; color: #7289da; padding: 20px;">
+                            No commands used yet
+                        </div>
+                    <% } %>
+                </div>
+            </div>
+        </div>
+        
+        <button class="refresh-btn" onclick="refreshPage()">🔄 Refresh Status</button>
+        
+        <div class="api-info">
+            <p>📡 API Endpoint: <a href="/api/stats" class="api-link" target="_blank">/api/stats</a></p>
+            <p>💚 Health Check: <a href="/health" class="api-link" target="_blank">/health</a></p>
+        </div>
+        
+        <footer>
+            <p>🕐 Last updated: <%= new Date().toLocaleString() %></p>
+            <p style="margin-top: 10px; color: #7289da;">Auto-refresh every 30 seconds</p>
+        </footer>
+    </div>
+</body>
+</html>
