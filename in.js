@@ -1,3 +1,4 @@
+// index.js
 const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, MessageFlags, PermissionFlagsBits } = require('discord.js');
 const axios = require('axios');
 const express = require('express');
@@ -11,11 +12,26 @@ const utils = require('./modules/utils');
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+
+// API Keys for multiple providers
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
 const OPENROUTER_IMAGE_KEY = process.env.OPENROUTER_IMAGE_KEY;
 const WEATHER_API_KEY = process.env.WEATHER_API_KEY;
-const MODEL = process.env.MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
+
+// Model configurations for different providers
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-pro';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
+
 const IMAGE_MODEL = process.env.IMAGE_MODEL || 'z-ai/glm-4-5-air:free';
+
+// API provider priority (in order of preference)
+const API_PROVIDERS = ['openrouter', 'gemini', 'openai'];
+const CURRENT_API_PROVIDER = { current: 'openrouter' }; // Track current provider
+
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').filter(Boolean);
 const WEB_PORT = process.env.WEB_PORT || 3000;
 
@@ -31,6 +47,12 @@ if (!CLIENT_ID) {
   process.exit(1);
 }
 
+// Check if at least one API provider is available
+if (!OPENROUTER_API_KEY && !GEMINI_API_KEY && !OPENAI_API_KEY) {
+  console.error('❌ Thiếu ít nhất một API key (OPENROUTER_API_KEY, GEMINI_API_KEY, hoặc OPENAI_API_KEY) trong .env file!');
+  process.exit(1);
+}
+
 // ==================== WEB SERVER SETUP ====================
 const app = express();
 app.set('view engine', 'ejs');
@@ -43,7 +65,7 @@ app.use((req, res, next) => {
   res.locals.stats = stats;
   res.locals.commandUsage = commandUsage;
   res.locals.activeGames = activeGames;
-  res.locals.MODEL = MODEL;
+  res.locals.MODEL = OPENROUTER_MODEL; // Default display model
   res.locals.IMAGE_MODEL = IMAGE_MODEL;
   next();
 });
@@ -66,7 +88,7 @@ app.get('/', (req, res) => {
     stats: stats,
     commands: Object.fromEntries(commandUsage),
     activeGames: activeGames.size,
-    model: MODEL,
+    model: `${OPENROUTER_MODEL} (${CURRENT_API_PROVIDER.current})`,
     imageModel: IMAGE_MODEL,
     conversationHistory: conversationHistory.size,
     userProfiles: userProfiles.size
@@ -82,7 +104,7 @@ app.get('/api/stats', (req, res) => {
     stats: stats,
     commands: Object.fromEntries(commandUsage),
     activeGames: activeGames.size,
-    model: MODEL,
+    model: `${OPENROUTER_MODEL} (${CURRENT_API_PROVIDER.current})`,
     imageModel: IMAGE_MODEL,
     conversationHistory: conversationHistory.size,
     userProfiles: userProfiles.size,
@@ -171,7 +193,12 @@ const stats = {
   modelSwitches: 0,
   personalityChanges: 0,
   weatherQueries: 0,
-  gamesPlayed: 0
+  gamesPlayed: 0,
+  apiFailures: {
+    openrouter: 0,
+    gemini: 0,
+    openai: 0
+  }
 };
 
 // ==================== IMAGE STYLES ====================
@@ -293,6 +320,211 @@ function formatViews(views) {
 }
 
 // ==================== API FUNCTIONS ====================
+// Function to get the next available API provider
+function getNextApiProvider(currentProvider) {
+  const currentIndex = API_PROVIDERS.indexOf(currentProvider);
+  if (currentIndex === -1) return API_PROVIDERS[0];
+  
+  for (let i = currentIndex + 1; i < API_PROVIDERS.length; i++) {
+    const provider = API_PROVIDERS[i];
+    if (
+      (provider === 'openrouter' && OPENROUTER_API_KEY) ||
+      (provider === 'gemini' && GEMINI_API_KEY) ||
+      (provider === 'openai' && OPENAI_API_KEY)
+    ) {
+      return provider;
+    }
+  }
+  
+  // If we've tried all providers, start from the beginning
+  for (let i = 0; i < currentIndex; i++) {
+    const provider = API_PROVIDERS[i];
+    if (
+      (provider === 'openrouter' && OPENROUTER_API_KEY) ||
+      (provider === 'gemini' && GEMINI_API_KEY) ||
+      (provider === 'openai' && OPENAI_API_KEY)
+    ) {
+      return provider;
+    }
+  }
+  
+  return null; // No available providers
+}
+
+// Function to check if an API provider is available
+function isProviderAvailable(provider) {
+  if (provider === 'openrouter') return !!OPENROUTER_API_KEY;
+  if (provider === 'gemini') return !!GEMINI_API_KEY;
+  if (provider === 'openai') return !!OPENAI_API_KEY;
+  return false;
+}
+
+// Enhanced API call function with fallback mechanism
+async function callOpenRouter(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  let currentProvider = CURRENT_API_PROVIDER.current;
+  let lastError = null;
+  
+  // Try each provider in order until one works
+  for (let attempt = 0; attempt < API_PROVIDERS.length; attempt++) {
+    if (!isProviderAvailable(currentProvider)) {
+      currentProvider = getNextApiProvider(currentProvider);
+      if (!currentProvider) break;
+      continue;
+    }
+    
+    try {
+      let response;
+      
+      if (currentProvider === 'openrouter') {
+        response = await callOpenRouterAPI(messages, { temperature, maxTokens });
+      } else if (currentProvider === 'gemini') {
+        response = await callGeminiAPI(messages, { temperature, maxTokens });
+      } else if (currentProvider === 'openai') {
+        response = await callOpenAIAPI(messages, { temperature, maxTokens });
+      }
+      
+      // Update current provider if we switched
+      if (currentProvider !== CURRENT_API_PROVIDER.current) {
+        CURRENT_API_PROVIDER.current = currentProvider;
+        stats.modelSwitches++;
+        console.log(`🔄 Switched to ${currentProvider} API`);
+      }
+      
+      return response;
+    } catch (error) {
+      lastError = error;
+      stats.apiFailures[currentProvider]++;
+      console.error(`❌ ${currentProvider} API error:`, error.message);
+      
+      // Try the next provider
+      currentProvider = getNextApiProvider(currentProvider);
+      if (!currentProvider) break;
+    }
+  }
+  
+  // If all providers failed, throw the last error
+  throw lastError || new Error('All API providers are unavailable');
+}
+
+// OpenRouter API call
+async function callOpenRouterAPI(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  
+  for (let i = 0; i <= 2; i++) {
+    try {
+      const response = await axios.post(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          model: OPENROUTER_MODEL,
+          messages: messages,
+          temperature: temperature,
+          max_tokens: maxTokens,
+          top_p: 0.9,
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'HTTP-Referer': 'https://discord.com',
+            'X-Title': 'Discord AI Bot',
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000
+        }
+      );
+
+      return response.data.choices[0].message.content;
+    } catch (error) {
+      if (i === 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+}
+
+// Gemini API call
+async function callGeminiAPI(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  
+  // Convert messages to Gemini format
+  const geminiMessages = [];
+  let systemPrompt = '';
+  
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemPrompt = msg.content;
+    } else {
+      geminiMessages.push({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }]
+      });
+    }
+  }
+  
+  // Add system prompt to the first user message if it exists
+  if (systemPrompt && geminiMessages.length > 0 && geminiMessages[0].role === 'user') {
+    geminiMessages[0].parts[0].text = `${systemPrompt}\n\n${geminiMessages[0].parts[0].text}`;
+  }
+  
+  for (let i = 0; i <= 2; i++) {
+    try {
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          contents: geminiMessages,
+          generationConfig: {
+            temperature: temperature,
+            maxOutputTokens: maxTokens,
+            topP: 0.9,
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000
+        }
+      );
+
+      return response.data.candidates[0].content.parts[0].text;
+    } catch (error) {
+      if (i === 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+}
+
+// OpenAI API call
+async function callOpenAIAPI(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  
+  for (let i = 0; i <= 2; i++) {
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model: OPENAI_MODEL,
+          messages: messages,
+          temperature: temperature,
+          max_tokens: maxTokens,
+          top_p: 0.9,
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000
+        }
+      );
+
+      return response.data.choices[0].message.content;
+    } catch (error) {
+      if (i === 2) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+}
+
 async function enhanceImagePrompt(userPrompt, style = 'realistic') {
   const styleModifier = IMAGE_STYLES[style] || IMAGE_STYLES.realistic;
   
@@ -312,26 +544,8 @@ TUYỆT ĐỐI CHỈ trả về prompt tiếng Anh ngắn gọn, không giải t
   ];
 
   try {
-    const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
-      {
-        model: IMAGE_MODEL,
-        messages: messages,
-        temperature: 0.8,
-        max_tokens: 150,
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${OPENROUTER_IMAGE_KEY}`,
-          'HTTP-Referer': 'https://discord.com',
-          'X-Title': 'Discord AI Bot - Image',
-          'Content-Type': 'application/json',
-        },
-        timeout: 15000
-      }
-    );
-
-    const enhanced = response.data.choices[0].message.content.trim();
+    const response = await callOpenRouter(messages, { maxTokens: 150 });
+    const enhanced = response.trim();
     return `${enhanced}, ${styleModifier}`;
   } catch (error) {
     console.error('Enhance prompt error:', error.message);
@@ -355,39 +569,6 @@ async function generateImage(prompt, options = {}) {
     buffer: Buffer.from(response.data),
     url: url
   };
-}
-
-async function callOpenRouter(messages, options = {}) {
-  const { temperature = 0.7, maxTokens = 600 } = options;
-  
-  for (let i = 0; i <= 2; i++) {
-    try {
-      const response = await axios.post(
-        'https://openrouter.ai/api/v1/chat/completions',
-        {
-          model: MODEL,
-          messages: messages,
-          temperature: temperature,
-          max_tokens: maxTokens,
-          top_p: 0.9,
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-            'HTTP-Referer': 'https://discord.com',
-            'X-Title': 'Discord AI Bot',
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000
-        }
-      );
-
-      return response.data.choices[0].message.content;
-    } catch (error) {
-      if (i === 2) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
 }
 
 async function getWeather(location) {
@@ -678,7 +859,8 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 client.once('ready', async () => {
   try {
     console.log(`✅ Bot: ${client.user.tag}`);
-    console.log(`🤖 Model: ${MODEL}`);
+    console.log(`🤖 Primary Model: ${OPENROUTER_MODEL} (OpenRouter)`);
+    console.log(`🤖 Backup Models: ${GEMINI_MODEL} (Gemini), ${OPENAI_MODEL} (OpenAI)`);
     console.log(`🎨 Image Model: ${IMAGE_MODEL}`);
     console.log(`📝 Servers: ${client.guilds.cache.size}`);
     console.log(`👥 Users: ${client.users.cache.size}`);
@@ -765,7 +947,7 @@ client.on('interactionCreate', async (interaction) => {
       break;
       
     case 'stats':
-      await utils.handleStats(interaction, { stats, conversationHistory, userProfiles, commandUsage });
+      await utils.handleStats(interaction, { stats, conversationHistory, userProfiles, commandUsage, CURRENT_API_PROVIDER });
       break;
       
     case 'translate':
