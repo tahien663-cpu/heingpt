@@ -1,4 +1,3 @@
-// index.js
 const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, MessageFlags, PermissionFlagsBits } = require('discord.js');
 const axios = require('axios');
 const express = require('express');
@@ -13,10 +12,10 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-// API Keys for multiple providers
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+// API Keys for multiple providers (support multiple keys separated by commas)
+const OPENROUTER_API_KEYS = process.env.OPENROUTER_API_KEY ? process.env.OPENROUTER_API_KEY.split(',').map(key => key.trim()).filter(Boolean) : [];
+const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()).filter(Boolean) : [];
+const OPENAI_API_KEYS = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.split(',').map(key => key.trim()).filter(Boolean) : [];
 
 const OPENROUTER_IMAGE_KEY = process.env.OPENROUTER_IMAGE_KEY;
 const WEATHER_API_KEY = process.env.WEATHER_API_KEY;
@@ -48,10 +47,16 @@ if (!CLIENT_ID) {
 }
 
 // Check if at least one API provider is available
-if (!OPENROUTER_API_KEY && !GEMINI_API_KEY && !OPENAI_API_KEY) {
+if (OPENROUTER_API_KEYS.length === 0 && GEMINI_API_KEYS.length === 0 && OPENAI_API_KEYS.length === 0) {
   console.error('❌ Thiếu ít nhất một API key (OPENROUTER_API_KEY, GEMINI_API_KEY, hoặc OPENAI_API_KEY) trong .env file!');
   process.exit(1);
 }
+
+// Log available API keys
+console.log(`🔑 Available API Keys:`);
+if (OPENROUTER_API_KEYS.length > 0) console.log(`   OpenRouter: ${OPENROUTER_API_KEYS.length} keys`);
+if (GEMINI_API_KEYS.length > 0) console.log(`   Gemini: ${GEMINI_API_KEYS.length} keys`);
+if (OPENAI_API_KEYS.length > 0) console.log(`   OpenAI: ${OPENAI_API_KEYS.length} keys`);
 
 // ==================== WEB SERVER SETUP ====================
 const app = express();
@@ -198,6 +203,11 @@ const stats = {
     openrouter: 0,
     gemini: 0,
     openai: 0
+  },
+  keyFailures: {
+    openrouter: {},
+    gemini: {},
+    openai: {}
   }
 };
 
@@ -328,9 +338,9 @@ function getNextApiProvider(currentProvider) {
   for (let i = currentIndex + 1; i < API_PROVIDERS.length; i++) {
     const provider = API_PROVIDERS[i];
     if (
-      (provider === 'openrouter' && OPENROUTER_API_KEY) ||
-      (provider === 'gemini' && GEMINI_API_KEY) ||
-      (provider === 'openai' && OPENAI_API_KEY)
+      (provider === 'openrouter' && OPENROUTER_API_KEYS.length > 0) ||
+      (provider === 'gemini' && GEMINI_API_KEYS.length > 0) ||
+      (provider === 'openai' && OPENAI_API_KEYS.length > 0)
     ) {
       return provider;
     }
@@ -340,9 +350,9 @@ function getNextApiProvider(currentProvider) {
   for (let i = 0; i < currentIndex; i++) {
     const provider = API_PROVIDERS[i];
     if (
-      (provider === 'openrouter' && OPENROUTER_API_KEY) ||
-      (provider === 'gemini' && GEMINI_API_KEY) ||
-      (provider === 'openai' && OPENAI_API_KEY)
+      (provider === 'openrouter' && OPENROUTER_API_KEYS.length > 0) ||
+      (provider === 'gemini' && GEMINI_API_KEYS.length > 0) ||
+      (provider === 'openai' && OPENAI_API_KEYS.length > 0)
     ) {
       return provider;
     }
@@ -353,10 +363,167 @@ function getNextApiProvider(currentProvider) {
 
 // Function to check if an API provider is available
 function isProviderAvailable(provider) {
-  if (provider === 'openrouter') return !!OPENROUTER_API_KEY;
-  if (provider === 'gemini') return !!GEMINI_API_KEY;
-  if (provider === 'openai') return !!OPENAI_API_KEY;
+  if (provider === 'openrouter') return OPENROUTER_API_KEYS.length > 0;
+  if (provider === 'gemini') return GEMINI_API_KEYS.length > 0;
+  if (provider === 'openai') return OPENAI_API_KEYS.length > 0;
   return false;
+}
+
+// Function to get random API key
+function getRandomKey(keys) {
+  return keys[Math.floor(Math.random() * keys.length)];
+}
+
+// Function to try each API key with retry mechanism
+async function callWithRetry(keys, apiCallFunction, providerName) {
+  if (keys.length === 0) {
+    throw new Error(`No ${providerName} API keys available`);
+  }
+  
+  // Shuffle keys to try in random order
+  const shuffledKeys = [...keys];
+  for (let i = shuffledKeys.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffledKeys[i], shuffledKeys[j]] = [shuffledKeys[j], shuffledKeys[i]];
+  }
+  
+  for (let i = 0; i < shuffledKeys.length; i++) {
+    try {
+      return await apiCallFunction(shuffledKeys[i]);
+    } catch (error) {
+      // Add key index to error for tracking
+      error.keyIndex = i;
+      error.provider = providerName;
+      console.error(`❌ ${providerName} key ${i} failed:`, error.message);
+      continue; // Try next key
+    }
+  }
+  
+  throw new Error(`All ${providerName} API keys failed`);
+}
+
+// OpenRouter API call
+async function callOpenRouterAPI(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  
+  return callWithRetry(OPENROUTER_API_KEYS, async (apiKey) => {
+    for (let i = 0; i <= 2; i++) {
+      try {
+        const response = await axios.post(
+          'https://openrouter.ai/api/v1/chat/completions',
+          {
+            model: OPENROUTER_MODEL,
+            messages: messages,
+            temperature: temperature,
+            max_tokens: maxTokens,
+            top_p: 0.9,
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'HTTP-Referer': 'https://discord.com',
+              'X-Title': 'Discord AI Bot',
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000
+          }
+        );
+
+        return response.data.choices[0].message.content;
+      } catch (error) {
+        if (i === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+      }
+    }
+  }, 'openrouter');
+}
+
+// Gemini API call
+async function callGeminiAPI(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  
+  // Convert messages to Gemini format
+  const geminiMessages = [];
+  let systemPrompt = '';
+  
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemPrompt = msg.content;
+    } else {
+      geminiMessages.push({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }]
+      });
+    }
+  }
+  
+  // Add system prompt to the first user message if it exists
+  if (systemPrompt && geminiMessages.length > 0 && geminiMessages[0].role === 'user') {
+    geminiMessages[0].parts[0].text = `${systemPrompt}\n\n${geminiMessages[0].parts[0].text}`;
+  }
+  
+  return callWithRetry(GEMINI_API_KEYS, async (apiKey) => {
+    for (let i = 0; i <= 2; i++) {
+      try {
+        const response = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+          {
+            contents: geminiMessages,
+            generationConfig: {
+              temperature: temperature,
+              maxOutputTokens: maxTokens,
+              topP: 0.9,
+            }
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000
+          }
+        );
+
+        return response.data.candidates[0].content.parts[0].text;
+      } catch (error) {
+        if (i === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+      }
+    }
+  }, 'gemini');
+}
+
+// OpenAI API call
+async function callOpenAIAPI(messages, options = {}) {
+  const { temperature = 0.7, maxTokens = 600 } = options;
+  
+  return callWithRetry(OPENAI_API_KEYS, async (apiKey) => {
+    for (let i = 0; i <= 2; i++) {
+      try {
+        const response = await axios.post(
+          'https://api.openai.com/v1/chat/completions',
+          {
+            model: OPENAI_MODEL,
+            messages: messages,
+            temperature: temperature,
+            max_tokens: maxTokens,
+            top_p: 0.9,
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000
+          }
+        );
+
+        return response.data.choices[0].message.content;
+      } catch (error) {
+        if (i === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+      }
+    }
+  }, 'openai');
 }
 
 // Enhanced API call function with fallback mechanism
@@ -395,6 +562,13 @@ async function callOpenRouter(messages, options = {}) {
     } catch (error) {
       lastError = error;
       stats.apiFailures[currentProvider]++;
+      
+      // Log key failure if available
+      if (error.keyIndex !== undefined) {
+        const keyName = `${currentProvider}_key_${error.keyIndex}`;
+        stats.keyFailures[currentProvider][keyName] = (stats.keyFailures[currentProvider][keyName] || 0) + 1;
+      }
+      
       console.error(`❌ ${currentProvider} API error:`, error.message);
       
       // Try the next provider
@@ -405,124 +579,6 @@ async function callOpenRouter(messages, options = {}) {
   
   // If all providers failed, throw the last error
   throw lastError || new Error('All API providers are unavailable');
-}
-
-// OpenRouter API call
-async function callOpenRouterAPI(messages, options = {}) {
-  const { temperature = 0.7, maxTokens = 600 } = options;
-  
-  for (let i = 0; i <= 2; i++) {
-    try {
-      const response = await axios.post(
-        'https://openrouter.ai/api/v1/chat/completions',
-        {
-          model: OPENROUTER_MODEL,
-          messages: messages,
-          temperature: temperature,
-          max_tokens: maxTokens,
-          top_p: 0.9,
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-            'HTTP-Referer': 'https://discord.com',
-            'X-Title': 'Discord AI Bot',
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000
-        }
-      );
-
-      return response.data.choices[0].message.content;
-    } catch (error) {
-      if (i === 2) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
-}
-
-// Gemini API call
-async function callGeminiAPI(messages, options = {}) {
-  const { temperature = 0.7, maxTokens = 600 } = options;
-  
-  // Convert messages to Gemini format
-  const geminiMessages = [];
-  let systemPrompt = '';
-  
-  for (const msg of messages) {
-    if (msg.role === 'system') {
-      systemPrompt = msg.content;
-    } else {
-      geminiMessages.push({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }]
-      });
-    }
-  }
-  
-  // Add system prompt to the first user message if it exists
-  if (systemPrompt && geminiMessages.length > 0 && geminiMessages[0].role === 'user') {
-    geminiMessages[0].parts[0].text = `${systemPrompt}\n\n${geminiMessages[0].parts[0].text}`;
-  }
-  
-  for (let i = 0; i <= 2; i++) {
-    try {
-      const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          contents: geminiMessages,
-          generationConfig: {
-            temperature: temperature,
-            maxOutputTokens: maxTokens,
-            topP: 0.9,
-          }
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000
-        }
-      );
-
-      return response.data.candidates[0].content.parts[0].text;
-    } catch (error) {
-      if (i === 2) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
-}
-
-// OpenAI API call
-async function callOpenAIAPI(messages, options = {}) {
-  const { temperature = 0.7, maxTokens = 600 } = options;
-  
-  for (let i = 0; i <= 2; i++) {
-    try {
-      const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
-        {
-          model: OPENAI_MODEL,
-          messages: messages,
-          temperature: temperature,
-          max_tokens: maxTokens,
-          top_p: 0.9,
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000
-        }
-      );
-
-      return response.data.choices[0].message.content;
-    } catch (error) {
-      if (i === 2) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-    }
-  }
 }
 
 async function enhanceImagePrompt(userPrompt, style = 'realistic') {
