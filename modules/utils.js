@@ -1,4 +1,3 @@
-// modules/utils.js
 const { EmbedBuilder, ActivityType, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const axios = require('axios');
 
@@ -304,6 +303,12 @@ async function handleStats(interaction, { stats, conversationHistory, userProfil
     return `${status} ${provider.charAt(0).toUpperCase() + provider.slice(1)}: ${failures} failures`;
   }).join('\n');
 
+  // Key failures summary
+  const keyFailuresSummary = Object.entries(stats.keyFailures).map(([provider, keys]) => {
+    const totalKeyFailures = Object.values(keys).reduce((sum, count) => sum + count, 0);
+    return `${provider}: ${totalKeyFailures} key failures`;
+  }).join('\n') || 'No key failures';
+
   await interaction.reply({
     embeds: [new EmbedBuilder()
       .setColor('#E74C3C')
@@ -322,7 +327,8 @@ async function handleStats(interaction, { stats, conversationHistory, userProfil
         { name: '🎮 Trò chơi chơi', value: `${stats.gamesPlayed}`, inline: true },
         { name: '🔄 Model switches', value: `${stats.modelSwitches}`, inline: true },
         { name: '🔥 Top Commands', value: topCommands || 'Chưa có' },
-        { name: '🤖 API Provider', value: `Current: ${CURRENT_API_PROVIDER.current}\n\n${apiStatus}` }
+        { name: '🤖 API Provider', value: `Current: ${CURRENT_API_PROVIDER.current}\n\n${apiStatus}` },
+        { name: '🔑 Key Failures', value: keyFailuresSummary }
       )
       .setFooter({ text: 'Từ lần restart cuối' })
       .setTimestamp()]
@@ -976,7 +982,7 @@ async function handleWeather(interaction, { getUserProfile, getWeather }) {
   try {
     const weatherData = await getWeather(location);
     
-    const iconUrl = `http://openweathermap.org/img/yn/${weatherData.icon}@2x.png`;
+    const iconUrl = `http://openweathermap.org/img/wn/${weatherData.icon}@2x.png`;
     
     await interaction.editReply({
       embeds: [new EmbedBuilder()
@@ -1741,7 +1747,7 @@ async function handleButtonInteraction(interaction, { activeGames }) {
         }
         
         // Find the lowest empty row in the column
-        let currentRow = -1;
+        let row = -1;
         for (let r = 5; r >= 0; r--) {
           if (game.grid[r][column] === '') {
             row = r;
@@ -1805,405 +1811,3 @@ async function handleButtonInteraction(interaction, { activeGames }) {
               boardDisplay += game.grid[r][c] || '⚪ ';
             }
             boardDisplay += '\n';
-          }
-          boardDisplay += '1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣';
-          
-          await interaction.update({
-            embeds: [new EmbedBuilder()
-              .setColor('#FFD700')
-              .setTitle('🔴 Connect 4 - Hòa!')
-              .addFields(
-                { name: 'Bảng chơi', value: boardDisplay }
-              )
-              .setTimestamp()],
-            components: []
-          });
-          return;
-        }
-        
-        // Bot's move
-        let botColumn = -1;
-        let botRow = -1;
-        
-        // Try to find a winning move
-        for (let c = 0; c < 7; c++) {
-          for (let r = 5; r >= 0; r--) {
-            if (game.grid[r][c] === '') {
-              game.grid[r][c] = '🔵';
-              if (checkConnect4Win(game.grid, '🔵')) {
-                botColumn = c;
-                botRow = r;
-              }
-              game.grid[r][c] = '';
-              break;
-            }
-          }
-          if (botColumn !== -1) break;
-        }
-        
-        // If no winning move, try to block player
-        if (botColumn === -1) {
-          for (let c = 0; c < 7; c++) {
-            for (let r = 5; r >= 0; r--) {
-              if (game.grid[r][c] === '') {
-                game.grid[r][c] = '🔴';
-                if (checkConnect4Win(game.grid, '🔴')) {
-                  botColumn = c;
-                  botRow = r;
-                }
-                game.grid[r][c] = '';
-                break;
-              }
-            }
-            if (botColumn !== -1) break;
-          }
-        }
-        
-        // If no strategic move, pick a random column
-        if (botColumn === -1) {
-          const availableColumns = [];
-          for (let c = 0; c < 7; c++) {
-            if (game.grid[0][c] === '') {
-              availableColumns.push(c);
-            }
-          }
-          
-          botColumn = availableColumns[Math.floor(Math.random() * availableColumns.length)];
-          for (let r = 5; r >= 0; r--) {
-            if (game.grid[r][botColumn] === '') {
-              botRow = r;
-              break;
-            }
-          }
-        }
-        
-        // Place bot's piece
-        game.grid[botRow][botColumn] = '🔵';
-        
-        // Check if bot won
-        if (checkConnect4Win(game.grid, '🔵')) {
-          activeGames.delete(gameId);
-          
-          // Update the board display
-          let boardDisplay = '';
-          for (let r = 0; r < 6; r++) {
-            for (let c = 0; c < 7; c++) {
-              boardDisplay += game.grid[r][c] || '⚪ ';
-            }
-            boardDisplay += '\n';
-          }
-          boardDisplay += '1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣';
-          
-          await interaction.update({
-            embeds: [new EmbedBuilder()
-              .setColor('#FF0000')
-              .setTitle('🔴 Connect 4 - Bot thắng!')
-              .addFields(
-                { name: 'Bảng chơi', value: boardDisplay }
-              )
-              .setTimestamp()],
-            components: []
-          });
-          return;
-        }
-        
-        // Check if draw
-        isDraw = true;
-        for (let c = 0; c < 7; c++) {
-          if (game.grid[0][c] === '') {
-            isDraw = false;
-            break;
-          }
-        }
-        
-        if (isDraw) {
-          activeGames.delete(gameId);
-          
-          // Update the board display
-          let boardDisplay = '';
-          for (let r = 0; r < 6; r++) {
-            for (let c = 0; c < 7; c++) {
-              boardDisplay += game.grid[r][c] || '⚪ ';
-            }
-            boardDisplay += '\n';
-          }
-          boardDisplay += '1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣';
-          
-          await interaction.update({
-            embeds: [new EmbedBuilder()
-              .setColor('#FFD700')
-              .setTitle('🔴 Connect 4 - Hòa!')
-              .addFields(
-                { name: 'Bảng chơi', value: boardDisplay }
-              )
-              .setTimestamp()],
-            components: []
-          });
-          return;
-        }
-        
-        // Update the board display
-        let boardDisplay = '';
-        for (let r = 0; r < 6; r++) {
-          for (let c = 0; c < 7; c++) {
-            boardDisplay += game.grid[r][c] || '⚪ ';
-          }
-          boardDisplay += '\n';
-        }
-        boardDisplay += '1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣';
-        
-        // Update the buttons
-        const row = new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId('connect4_1')
-              .setLabel('1')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][0] !== ''),
-            new ButtonBuilder()
-              .setCustomId('connect4_2')
-              .setLabel('2')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][1] !== ''),
-            new ButtonBuilder()
-              .setCustomId('connect4_3')
-              .setLabel('3')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][2] !== ''),
-            new ButtonBuilder()
-              .setCustomId('connect4_4')
-              .setLabel('4')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][3] !== '')
-          );
-        
-        const row2 = new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId('connect4_5')
-              .setLabel('5')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][4] !== ''),
-            new ButtonBuilder()
-              .setCustomId('connect4_6')
-              .setLabel('6')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][5] !== ''),
-            new ButtonBuilder()
-              .setCustomId('connect4_7')
-              .setLabel('7')
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(game.grid[0][6] !== ''),
-            new ButtonBuilder()
-              .setCustomId('connect4_reset')
-              .setLabel('Reset')
-              .setStyle(ButtonStyle.Danger)
-          );
-        
-        await interaction.update({
-          embeds: [new EmbedBuilder()
-            .setColor('#E74C3C')
-            .setTitle('🔴 Connect 4')
-            .setDescription('Chơi Connect 4 với bot! Kết nối 4 quân cờ theo hàng ngang, dọc hoặc chéo để thắng.')
-            .addFields(
-              { name: 'Bảng chơi', value: boardDisplay }
-            )
-            .setFooter({ text: `Game ID: ${gameId}` })
-            .setTimestamp()],
-          components: [row, row2]
-        });
-        
-        return;
-      }
-    }
-    
-    return interaction.reply({
-      content: '❌ Bạn chưa bắt đầu game Connect 4! Sử dụng `/connect4` để bắt đầu.',
-      flags: MessageFlags.Ephemeral
-    });
-  } else if (customId === 'connect4_reset') {
-    // Find active game for this user
-    for (const [gameId, game] of activeGames.entries()) {
-      if (game.type === 'connect4' && game.userId === interaction.user.id && game.channelId === interaction.channel.id) {
-        // Reset the game
-        game.grid = Array(6).fill(null).map(() => Array(7).fill(''));
-        
-        // Update the board display
-        let boardDisplay = '';
-        for (let r = 0; r < 6; r++) {
-          for (let c = 0; c < 7; c++) {
-            boardDisplay += game.grid[r][c] || '⚪ ';
-          }
-          boardDisplay += '\n';
-        }
-        boardDisplay += '1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣';
-        
-        // Update the buttons
-        const row = new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId('connect4_1')
-              .setLabel('1')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('connect4_2')
-              .setLabel('2')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('connect4_3')
-              .setLabel('3')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('connect4_4')
-              .setLabel('4')
-              .setStyle(ButtonStyle.Secondary)
-          );
-        
-        const row2 = new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId('connect4_5')
-              .setLabel('5')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('connect4_6')
-              .setLabel('6')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('connect4_7')
-              .setLabel('7')
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId('connect4_reset')
-              .setLabel('Reset')
-              .setStyle(ButtonStyle.Danger)
-          );
-        
-        await interaction.update({
-          embeds: [new EmbedBuilder()
-            .setColor('#E74C3C')
-            .setTitle('🔴 Connect 4')
-            .setDescription('Chơi Connect 4 với bot! Kết nối 4 quân cờ theo hàng ngang, dọc hoặc chéo để thắng.')
-            .addFields(
-              { name: 'Bảng chơi', value: boardDisplay }
-            )
-            .setFooter({ text: `Game ID: ${gameId}` })
-            .setTimestamp()],
-          components: [row, row2]
-        });
-        
-        return;
-      }
-    }
-    
-    return interaction.reply({
-      content: '❌ Bạn chưa bắt đầu game Connect 4! Sử dụng `/connect4` để bắt đầu.',
-      flags: MessageFlags.Ephemeral
-    });
-  }
-}
-
-// Helper function to check win in Tic Tac Toe
-function checkWin(board, player) {
-  // Check rows
-  for (let i = 0; i < 3; i++) {
-    if (board[i * 3] === player && board[i * 3 + 1] === player && board[i * 3 + 2] === player) {
-      return true;
-    }
-  }
-  
-  // Check columns
-  for (let i = 0; i < 3; i++) {
-    if (board[i] === player && board[i + 3] === player && board[i + 6] === player) {
-      return true;
-    }
-  }
-  
-  // Check diagonals
-  if (board[0] === player && board[4] === player && board[8] === player) {
-    return true;
-  }
-  
-  if (board[2] === player && board[4] === player && board[6] === player) {
-    return true;
-  }
-  
-  return false;
-}
-
-// Helper function to check win in Connect 4
-function checkConnect4Win(grid, player) {
-  // Check horizontal
-  for (let r = 0; r < 6; r++) {
-    for (let c = 0; c < 4; c++) {
-      if (grid[r][c] === player && grid[r][c + 1] === player && grid[r][c + 2] === player && grid[r][c + 3] === player) {
-        return true;
-      }
-    }
-  }
-  
-  // Check vertical
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 7; c++) {
-      if (grid[r][c] === player && grid[r + 1][c] === player && grid[r + 2][c] === player && grid[r + 3][c] === player) {
-        return true;
-      }
-    }
-  }
-  
-  // Check diagonal (top-left to bottom-right)
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 4; c++) {
-      if (grid[r][c] === player && grid[r + 1][c + 1] === player && grid[r + 2][c + 2] === player && grid[r + 3][c + 3] === player) {
-        return true;
-      }
-    }
-  }
-  
-  // Check diagonal (bottom-left to top-right)
-  for (let r = 3; r < 6; r++) {
-    for (let c = 0; c < 4; c++) {
-      if (grid[r][c] === player && grid[r - 1][c + 1] === player && grid[r - 2][c + 2] === player && grid[r - 3][c + 3] === player) {
-        return true;
-      }
-    }
-  }
-  
-  return false;
-}
-
-module.exports = {
-  handleChat,
-  handleReset,
-  handlePersonality,
-  handleImage,
-  handleImagine,
-  handleProfile,
-  handleLeaderboard,
-  handleStats,
-  handleTranslate,
-  handleSummary,
-  handleCode,
-  handleQuiz,
-  handleJoke,
-  handleFact,
-  handleRemind,
-  handleRoll,
-  handleFlip,
-  handleRPS,
-  handleNumberGuess,
-  handleWordle,
-  handleMemoryGame,
-  handleTicTacToe,
-  handleTrivia,
-  handleHangman,
-  handleConnect4,
-  handleWeather,
-  handleAdmin,
-  handleHelp,
-  handleGuessCommand,
-  handleWordleGuessCommand,
-  handleMemoryFlipCommand,
-  handleHangmanGuessCommand,
-  handleButtonInteraction
-};
