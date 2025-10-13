@@ -917,7 +917,7 @@ async function handleConnect4(interaction, { activeGames, stats }) {
   }
   boardDisplay += '1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣';
   
-  const row = new ActionRowBuilder()
+  const rowConnect1 = new ActionRowBuilder()
     .addComponents(
       new ButtonBuilder()
         .setCustomId('connect4_1')
@@ -1747,7 +1747,7 @@ async function handleButtonInteraction(interaction, { activeGames }) {
         }
         
         // Find the lowest empty row in the column
-        let row = -1;
+        let rowPosition = -1;
         for (let r = 5; r >= 0; r--) {
           if (game.grid[r][column] === '') {
             row = r;
