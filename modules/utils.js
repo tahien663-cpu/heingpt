@@ -1,3 +1,4 @@
+// modules/utils.js
 const { EmbedBuilder, ActivityType, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const axios = require('axios');
 
@@ -281,7 +282,7 @@ async function handleLeaderboard(interaction, { userProfiles }) {
   });
 }
 
-async function handleStats(interaction, { stats, conversationHistory, userProfiles, commandUsage }) {
+async function handleStats(interaction, { stats, conversationHistory, userProfiles, commandUsage, CURRENT_API_PROVIDER }) {
   const totalConversations = conversationHistory.size;
   const totalUsers = userProfiles.size;
   const uptime = Date.now() - stats.startTime;
@@ -296,6 +297,12 @@ async function handleStats(interaction, { stats, conversationHistory, userProfil
     .slice(0, 5)
     .map(([cmd, count]) => `\`${cmd}\`: ${count}`)
     .join('\n');
+
+  // API provider status
+  const apiStatus = Object.entries(stats.apiFailures).map(([provider, failures]) => {
+    const status = failures === 0 ? '🟢' : failures < 5 ? '🟡' : '🔴';
+    return `${status} ${provider.charAt(0).toUpperCase() + provider.slice(1)}: ${failures} failures`;
+  }).join('\n');
 
   await interaction.reply({
     embeds: [new EmbedBuilder()
@@ -313,7 +320,9 @@ async function handleStats(interaction, { stats, conversationHistory, userProfil
         { name: '🎭 Personality switches', value: `${stats.personalityChanges}`, inline: true },
         { name: '🌤️ Truy vấn thời tiết', value: `${stats.weatherQueries}`, inline: true },
         { name: '🎮 Trò chơi chơi', value: `${stats.gamesPlayed}`, inline: true },
-        { name: '🔥 Top Commands', value: topCommands || 'Chưa có' }
+        { name: '🔄 Model switches', value: `${stats.modelSwitches}`, inline: true },
+        { name: '🔥 Top Commands', value: topCommands || 'Chưa có' },
+        { name: '🤖 API Provider', value: `Current: ${CURRENT_API_PROVIDER.current}\n\n${apiStatus}` }
       )
       .setFooter({ text: 'Từ lần restart cuối' })
       .setTimestamp()]
