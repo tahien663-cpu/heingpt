@@ -152,15 +152,16 @@ const COOLDOWN_TIME = 3000;
 const PERSONALITIES = {
   default: {
     name: 'Hein - Mặc định',
-    prompt: `Bạn là Hein, một AI trợ lý thông minh, đa năng và thân thiện. Hãy trả lời:
+    prompt: `Bạn là Hein, một AI trợ lý thông minh, đa năng và thẳng thắn. Hãy trả lời:
 - Ngắn gọn (2-3 câu tối đa), đi thẳng vào vấn đề
 - Sử dụng emoji phù hợp để tăng tính biểu cảm
-- Thân thiện nhưng chuyên nghiệp
+- Có thể dùng từ ngữ mạnh, chửi bậy một cách tự nhiên khi cần thiết (nhưng không quá lố)
+- Thân thiện, thẳng thắn và đôi khi hơi "láo"
 - Có thể trả lời bằng Tiếng Việt hoặc Tiếng Anh tùy theo ngôn ngữ người dùng
 - Khi không biết, hãy thẳng thắn thừa nhận và đề xuất hướng giải quyết
-- Tư duy logic, sáng tạo và đôi khi có chút "láo" nhưng vẫn lịch sự
+- Tư duy logic, sáng tạo và không ngại bày tỏ quan điểm
 
-QUAN TRỌNG: Luôn trả lời ngắn gọn, không dài dòng!`,
+QUAN TRỌNG: Luôn trả lời ngắn gọn, không dài dòng! Có thể dùng từ ngữ mạnh một cách tự nhiên!`,
     emoji: '🤖'
   },
   creative: {
@@ -210,6 +211,7 @@ Code phải production-ready và maintainable!`,
 - Biết khi nào nên nghiêm túc và khi nào nên hài hước
 - Tạo ra những câu trả lời gây cười nhưng vẫn có giá trị
 - Sử dụng emoji hài hước 😄🤪😂
+- Có thể dùng từ ngữ hài hước, chửi bậy một cách hài hước
 
 Mục tiêu: Khuấy động cuộc trò chuyện với tiếng cười!`,
     emoji: '😄'
@@ -609,6 +611,27 @@ async function callOpenRouter(messages, options = {}) {
   throw lastError || new Error('All API providers are unavailable');
 }
 
+// Function to switch API provider manually
+async function switchApiProvider(provider) {
+  if (!API_PROVIDERS.includes(provider)) {
+    throw new Error(`Provider "${provider}" is not supported. Available providers: ${API_PROVIDERS.join(', ')}`);
+  }
+  
+  if (!isProviderAvailable(provider)) {
+    throw new Error(`Provider "${provider}" is not available. No API keys configured.`);
+  }
+  
+  const previousProvider = CURRENT_API_PROVIDER.current;
+  CURRENT_API_PROVIDER.current = provider;
+  stats.modelSwitches++;
+  
+  console.log(`🔄 Manually switched from ${previousProvider} to ${provider} API`);
+  return {
+    previous: previousProvider,
+    current: provider
+  };
+}
+
 async function enhanceImagePrompt(userPrompt, style = 'realistic') {
   const styleModifier = IMAGE_STYLES[style] || IMAGE_STYLES.realistic;
   
@@ -716,6 +739,20 @@ const commands = [
           { name: 'Giáo viên', value: 'teacher' },
           { name: 'Lập trình viên', value: 'coder' },
           { name: 'Hài hước', value: 'funny' }
+        )),
+  
+  // NEW: AI Provider Command
+  new SlashCommandBuilder()
+    .setName('provider')
+    .setDescription('Chọn nhà cung cấp AI')
+    .addStringOption(option => 
+      option.setName('provider')
+        .setDescription('Nhà cung cấp AI')
+        .setRequired(true)
+        .addChoices(
+          { name: 'OpenRouter', value: 'openrouter' },
+          { name: 'Gemini', value: 'gemini' },
+          { name: 'OpenAI', value: 'openai' }
         )),
   
   // Image Commands
@@ -1033,6 +1070,11 @@ client.on('interactionCreate', async (interaction) => {
         });
         break;
         
+      // NEW: Handle provider command
+      case 'provider':
+        await handleProvider(interaction);
+        break;
+        
       case 'image':
         await utils.handleImage(interaction, { 
           stats, 
@@ -1175,6 +1217,52 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 });
+
+// ==================== PROVIDER COMMAND HANDLER ====================
+async function handleProvider(interaction) {
+  const provider = interaction.options.getString('provider');
+  
+  try {
+    await interaction.deferReply();
+    
+    const result = await switchApiProvider(provider);
+    
+    const providerNames = {
+      openrouter: 'OpenRouter',
+      gemini: 'Google Gemini',
+      openai: 'OpenAI'
+    };
+    
+    const providerModels = {
+      openrouter: OPENROUTER_MODEL,
+      gemini: GEMINI_MODEL,
+      openai: OPENAI_MODEL
+    };
+    
+    const embed = new EmbedBuilder()
+      .setColor('#00FF00')
+      .setTitle('🔄 AI Provider Changed')
+      .setDescription(`Đã chuyển từ **${providerNames[result.previous]}** sang **${providerNames[result.current]}**`)
+      .addFields(
+        { name: 'Provider cũ', value: providerNames[result.previous], inline: true },
+        { name: 'Provider mới', value: providerNames[result.current], inline: true },
+        { name: 'Model', value: providerModels[result.current], inline: true }
+      )
+      .setTimestamp();
+    
+    await interaction.editReply({ embeds: [embed] });
+  } catch (error) {
+    console.error('Provider switch error:', error);
+    
+    const errorEmbed = new EmbedBuilder()
+      .setColor('#FF0000')
+      .setTitle('❌ Lỗi khi chuyển provider')
+      .setDescription(error.message)
+      .setTimestamp();
+    
+    await interaction.editReply({ embeds: [errorEmbed] });
+  }
+}
 
 // ==================== MESSAGE CREATE HANDLER ====================
 client.on('messageCreate', async (message) => {
