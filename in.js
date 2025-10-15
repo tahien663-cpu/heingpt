@@ -77,6 +77,7 @@ const userCooldowns = new Map();
 const rateLimits = new Map();
 const weatherCache = new Map();
 const activeGames = new Map();
+const messageProcessing = new Set(); // Track messages being processed to prevent duplicates
 
 const MAX_HISTORY = 15; // Increased from 12
 const COOLDOWN_TIME = 2500; // Reduced from 3000ms
@@ -1459,94 +1460,118 @@ async function handleProvider(interaction) {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   
-  // Handle guess command for number guess game
-  if (message.content.startsWith('/guess ')) {
-    await utils.handleGuessCommand(message, { activeGames });
+  // Create a unique identifier for this message to prevent duplicate processing
+  const messageId = `${message.channel.id}-${message.id}`;
+  
+  // Check if this message is already being processed
+  if (messageProcessing.has(messageId)) {
     return;
   }
   
-  // Handle guess command for wordle game
-  if (message.content.startsWith('/wordleguess ')) {
-    await utils.handleWordleGuessCommand(message, { activeGames });
-    return;
-  }
+  // Mark this message as being processed
+  messageProcessing.add(messageId);
   
-  // Handle memoryflip command for memory game
-  if (message.content.startsWith('/memoryflip ')) {
-    await utils.handleMemoryFlipCommand(message, { activeGames });
-    return;
-  }
-  
-  // Handle hangmanguess command for hangman game
-  if (message.content.startsWith('/hangmanguess ')) {
-    await utils.handleHangmanGuessCommand(message, { activeGames });
-    return;
-  }
-  
-  // Handle mention chat
-  const isMentioned = message.mentions.has(client.user);
-  const isReply = message.reference?.messageId;
-  
-  if (!isMentioned && !isReply) return;
-
-  const rateCheck = checkRateLimit(message.author.id, 'message');
-  if (rateCheck.limited) {
-    return message.reply(`⏳ Rate limit! Đợi ${rateCheck.waitTime}s (Giới hạn: 25 tin/phút)`).catch(() => {});
-  }
-
-  const cooldown = checkCooldown(message.author.id);
-  if (cooldown > 0) {
-    return message.reply(`⏳ Cooldown ${cooldown}s`).catch(() => {});
-  }
-
-  let content = message.content.replace(/<@!?\d+>/g, '').trim();
-
-  if (!content) {
-    return message.reply('Bạn muốn hỏi gì? 😊').catch(() => {});
-  }
-
-  if (content.length > 1000) {
-    return message.reply('❌ Tin nhắn quá dài! Giới hạn 1000 ký tự.').catch(() => {});
-  }
-
-  await message.channel.sendTyping().catch(() => {});
-
   try {
-    const profile = getUserProfile(message.author.id);
-    const history = getHistory(message.author.id, message.channel.id);
+    // Handle guess command for number guess game
+    if (message.content.startsWith('/guess ')) {
+      await utils.handleGuessCommand(message, { activeGames });
+      return;
+    }
     
-    addToHistory(message.author.id, message.channel.id, 'user', content);
-
-    const response = await callOpenRouter(history, { temperature: 0.8 });
+    // Handle guess command for wordle game
+    if (message.content.startsWith('/wordleguess ')) {
+      await utils.handleWordleGuessCommand(message, { activeGames });
+      return;
+    }
     
-    addToHistory(message.author.id, message.channel.id, 'assistant', response);
-    stats.messagesProcessed++;
-    profile.totalMessages++;
-    updateUserProfile(message.author.id, profile);
+    // Handle memoryflip command for memory game
+    if (message.content.startsWith('/memoryflip ')) {
+      await utils.handleMemoryFlipCommand(message, { activeGames });
+      return;
+    }
+    
+    // Handle hangmanguess command for hangman game
+    if (message.content.startsWith('/hangmanguess ')) {
+      await utils.handleHangmanGuessCommand(message, { activeGames });
+      return;
+    }
+    
+    // Handle mention chat - check if bot is mentioned OR if message is a reply to bot
+    const isMentioned = message.mentions.has(client.user.id);
+    const isReply = message.reference && 
+                   (await message.fetchReference().catch(() => null))?.author?.id === client.user.id;
+    
+    if (!isMentioned && !isReply) return;
 
-    if (response.length > 2000) {
-      const chunks = response.match(/[\s\S]{1,2000}/g) || [];
-      for (const chunk of chunks) {
-        await message.reply(chunk).catch(() => {});
-      }
-    } else {
-      await message.reply(response).catch(() => {});
+    const rateCheck = checkRateLimit(message.author.id, 'message');
+    if (rateCheck.limited) {
+      return message.reply(`⏳ Rate limit! Đợi ${rateCheck.waitTime}s (Giới hạn: 25 tin/phút)`).catch(() => {});
     }
 
-  } catch (error) {
-    stats.errors++;
-    console.error('Message handling error:', error);
-    
-    const errorMessages = [
-      'Oop, something went wrong 💀 Try again?',
-      'Lỗi rồi bro, thử lại đi 😅',
-      'My bad, server hiccup. One more time?',
-      'Damn, AI đang lag. Retry nào 🔄'
-    ];
-    
-    const randomError = errorMessages[Math.floor(Math.random() * errorMessages.length)];
-    
-    await message.reply(randomError).catch(() => {});
+    const cooldown = checkCooldown(message.author.id);
+    if (cooldown > 0) {
+      return message.reply(`⏳ Cooldown ${cooldown}s`).catch(() => {});
+    }
+
+    let content = message.content.replace(/<@!?\d+>/g, '').trim();
+
+    if (!content) {
+      return message.reply('Bạn muốn hỏi gì? 😊').catch(() => {});
+    }
+
+    if (content.length > 1000) {
+      return message.reply('❌ Tin nhắn quá dài! Giới hạn 1000 ký tự.').catch(() => {});
+    }
+
+    await message.channel.sendTyping().catch(() => {});
+
+    try {
+      const profile = getUserProfile(message.author.id);
+      const history = getHistory(message.author.id, message.channel.id);
+      
+      addToHistory(message.author.id, message.channel.id, 'user', content);
+
+      const response = await callOpenRouter(history, { temperature: 0.8 });
+      
+      addToHistory(message.author.id, message.channel.id, 'assistant', response);
+      stats.messagesProcessed++;
+      profile.totalMessages++;
+      updateUserProfile(message.author.id, profile);
+
+      // Improved response handling to prevent double responses
+      if (response.length > 2000) {
+        // For long responses, send as a single reply with embeds
+        const embed = new EmbedBuilder()
+          .setColor('#0099ff')
+          .setDescription(response.substring(0, 4096)) // Discord embed description limit
+          .setFooter({ text: `Response for ${message.author.username}` });
+        
+        await message.reply({ embeds: [embed] }).catch(() => {});
+      } else {
+        await message.reply(response).catch(() => {});
+      }
+
+    } catch (error) {
+      stats.errors++;
+      console.error('Message handling error:', error);
+      
+      const errorMessages = [
+        'Oop, something went wrong 💀 Try again?',
+        'Lỗi rồi bro, thử lại đi 😅',
+        'My bad, server hiccup. One more time?',
+        'Damn, AI đang lag. Retry nào 🔄'
+      ];
+      
+      const randomError = errorMessages[Math.floor(Math.random() * errorMessages.length)];
+      
+      await message.reply(randomError).catch(() => {});
+    }
+  } finally {
+    // Remove the message from the processing set after handling
+    // Use a timeout to ensure the message is fully processed before removing
+    setTimeout(() => {
+      messageProcessing.delete(messageId);
+    }, 5000); // 5 second timeout
   }
 });
 
@@ -1595,6 +1620,12 @@ setInterval(() => {
     if (Date.now() - value.timestamp > 3600000) { // 1 hour
       weatherCache.delete(key);
     }
+  }
+  
+  // Clean up message processing set to prevent memory leaks
+  if (messageProcessing.size > 100) {
+    console.log(`🧹 Cleaning up message processing set (${messageProcessing.size} entries)`);
+    messageProcessing.clear();
   }
   
   console.log(`🧹 Cleanup: ${conversationHistory.size} convos, ${userProfiles.size} users, ${activeGames.size} games, ${weatherCache.size} weather cache`);
@@ -1722,4 +1753,4 @@ module.exports = {
   switchApiProvider,
   PERSONALITIES,
   IMAGE_STYLES
-}
+};
