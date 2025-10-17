@@ -21,7 +21,7 @@ const OPENROUTER_IMAGE_KEY = process.env.OPENROUTER_IMAGE_KEY;
 const WEATHER_API_KEY = process.env.WEATHER_API_KEY;
 
 // Model configurations for different providers
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.2-3b-instruct:free';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'tngtech/deepseek-r1t2-chimera:free';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-pro';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
 
