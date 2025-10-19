@@ -247,7 +247,6 @@ You: "Tôi biết 100 cách để nướng bánh mì... trên lý thuyết 😂 
 };
 
 // ==================== STATS ====================
-// (Giữ nguyên, không thay đổi)
 const stats = {
   messagesProcessed: 0,
   imagesGenerated: 0,
@@ -267,7 +266,6 @@ const stats = {
 };
 
 // ==================== IMAGE STYLES ====================
-// (Giữ nguyên, không thay đổi)
 const IMAGE_STYLES = {
   realistic: 'photorealistic, 8k uhd, highly detailed, professional photography, natural lighting, sharp focus, dslr quality',
   anime: 'anime style, manga art, vibrant colors, detailed illustration, clean lines, cel shading, studio quality',
@@ -309,7 +307,6 @@ function updateUserProfile(userId, updates) {
 }
 
 function checkRateLimit(userId, action = 'message') {
-  // (Giữ nguyên, không thay đổi)
   const key = `${userId}_${action}`;
   const now = Date.now();
   const limit = rateLimits.get(key) || { count: 0, resetTime: now + 60000 };
@@ -350,7 +347,6 @@ function getHistory(userId, channelId) {
 }
 
 function addToHistory(userId, channelId, role, content) {
-  // (Giữ nguyên, không thay đổi)
   const key = getHistoryKey(userId, channelId);
   const history = getHistory(userId, channelId);
   history.push({ role, content });
@@ -364,7 +360,6 @@ function addToHistory(userId, channelId, role, content) {
 }
 
 function checkCooldown(userId) {
-  // (Giữ nguyên, không thay đổi)
   const now = Date.now();
   const cooldown = userCooldowns.get(userId);
   
@@ -381,7 +376,6 @@ function trackCommand(command) {
   stats.commandsUsed++;
 }
 
-// (Các hàm formatViews và formatUptime giữ nguyên)
 function formatViews(views) {
   const num = parseInt(views);
   if (isNaN(num)) return 'N/A';
@@ -402,13 +396,25 @@ function formatUptime(ms) {
 // CẢI TIẾN: Hàm làm sạch output, xóa markdown và các ký tự không mong muốn
 function sanitizeOutput(text) {
   if (!text) return '';
-  return text
-    .replace(/(\*\*|##|—|;)/g, '') // Xóa markdown, em-dash, semicolon
-    .trim();
+  // Chỉ xóa markdown khi nó không nằm trong code block
+  let inCodeBlock = false;
+  const lines = text.split('\n');
+  const processedLines = lines.map(line => {
+    if (line.startsWith('```')) {
+      inCodeBlock = !inCodeBlock;
+      return line; // Giữ nguyên dòng code block
+    }
+    if (inCodeBlock) {
+      return line; // Giữ nguyên nội dung trong code block
+    }
+    // Xóa markdown, em-dash, semicolon bên ngoài code block
+    return line.replace(/(\*\*|##|—|;)/g, '').trim();
+  });
+  
+  return processedLines.join('\n').trim();
 }
 
 // ==================== API FUNCTIONS ====================
-// (Các hàm getNextApiProvider, isProviderAvailable, getRandomKey giữ nguyên)
 function getNextApiProvider(currentProvider) {
   const currentIndex = API_PROVIDERS.indexOf(currentProvider);
   if (currentIndex === -1) return API_PROVIDERS[0];
@@ -437,7 +443,6 @@ function getRandomKey(keys) {
   return keys[Math.floor(Math.random() * keys.length)];
 }
 
-// (Hàm callWithRetry giữ nguyên)
 async function callWithRetry(keys, apiCallFunction, providerName) {
   if (keys.length === 0) {
     throw new Error(`No ${providerName} API keys available`);
@@ -476,9 +481,8 @@ async function callOpenRouterAPI(messages, options = {}) {
   const { temperature = 0.7, maxTokens = 800 } = options;
   
   return callWithRetry(OPENROUTER_API_KEYS, async (apiKey) => {
-    // Bỏ bớt 1 vòng lặp retry, callWithRetry đã xử lý
     const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
+      '[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)',
       {
         model: OPENROUTER_MODEL,
         messages: messages,
@@ -491,7 +495,7 @@ async function callOpenRouterAPI(messages, options = {}) {
       {
         headers: {
           'Authorization': `Bearer ${apiKey}`,
-          'HTTP-Referer': 'https://discord.com', // Thay bằng website của bạn nếu có
+          'HTTP-Referer': '[https://discord.com](https://discord.com)', // Thay bằng website của bạn nếu có
           'X-Title': 'HeinAI Discord Bot', // Tên bot của bạn
           'Content-Type': 'application/json',
         },
@@ -561,12 +565,11 @@ async function callGeminiAPI(messages, options = {}) {
 
 // OpenAI API call
 async function callOpenAIAPI(messages, options = {}) {
-  // (Giữ nguyên, không thay đổi)
   const { temperature = 0.7, maxTokens = 800 } = options;
   
   return callWithRetry(OPENAI_API_KEYS, async (apiKey) => {
     const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
+      '[https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)',
       {
         model: OPENAI_MODEL,
         messages: messages,
@@ -594,7 +597,10 @@ async function callOpenRouter(messages, options = {}) {
   let currentProvider = CURRENT_API_PROVIDER.current;
   let lastError = null;
   const startTime = Date.now();
-  
+
+  // Kiểm tra xem có phải là yêu cầu code không
+  const isCodeRequest = messages.some(msg => msg.content.includes('write code') || msg.content.includes('tạo code'));
+
   for (let attempt = 0; attempt < API_PROVIDERS.length; attempt++) {
     if (!isProviderAvailable(currentProvider)) {
       currentProvider = getNextApiProvider(currentProvider);
@@ -624,7 +630,10 @@ async function callOpenRouter(messages, options = {}) {
       stats.responseCount++;
       stats.averageResponseTime = Math.round(stats.responseTimeSum / stats.responseCount);
       
-      // CẢI TIẾN: Tự động làm sạch output
+      // CẢI TIẾN: Chỉ sanitize nếu *không* phải là yêu cầu code
+      if (isCodeRequest) {
+        return response.trim(); // Trả về nguyên bản nếu là code
+      }
       return sanitizeOutput(response);
 
     } catch (error) {
@@ -643,7 +652,6 @@ async function callOpenRouter(messages, options = {}) {
 
 // Function to switch API provider manually
 async function switchApiProvider(provider) {
-  // (Giữ nguyên, không thay đổi)
   if (!API_PROVIDERS.includes(provider)) {
     throw new Error(`Provider "${provider}" is not supported. Available: ${API_PROVIDERS.join(', ')}`);
   }
@@ -701,7 +709,7 @@ async function generateImage(prompt, options = {}) {
 
   try {
     const response = await axios.post(
-      'https://openrouter.ai/api/v1/images/generations',
+      '[https://openrouter.ai/api/v1/images/generations](https://openrouter.ai/api/v1/images/generations)',
       {
         model: model,
         prompt: prompt,
@@ -711,7 +719,7 @@ async function generateImage(prompt, options = {}) {
       {
         headers: {
           'Authorization': `Bearer ${OPENROUTER_IMAGE_KEY}`,
-          'HTTP-Referer': 'https://discord.com', // Thay bằng website của bạn
+          'HTTP-Referer': '[https://discord.com](https://discord.com)', // Thay bằng website của bạn
           'X-Title': 'HeinAI Discord Bot', // Tên bot của bạn
         },
         timeout: 60000 // 60 giây timeout
@@ -792,7 +800,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Web routes (Giữ nguyên)
+// Web routes
 app.get('/', (req, res) => {
   const uptime = Date.now() - stats.startTime;
   const uptimeFormatted = formatUptime(uptime);
@@ -838,7 +846,6 @@ app.get('/health', (req, res) => {
 });
 
 // ==================== SLASH COMMANDS ====================
-// (Giữ nguyên toàn bộ định nghĩa commands)
 const commands = [
   // AI Commands
   new SlashCommandBuilder()
@@ -1208,7 +1215,8 @@ client.on('interactionCreate', async (interaction) => {
         getWeather,
         ADMIN_IDS,
         EmbedBuilder,
-        ActivityType
+        ActivityType,
+        IMAGE_MODEL // <-- ĐÃ THÊM FIX NÀY
     };
 
     // Handle each command
@@ -1324,7 +1332,6 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ==================== PROVIDER COMMAND HANDLER ====================
-// (Giữ nguyên hàm này)
 async function handleProvider(interaction, { switchApiProvider, EmbedBuilder }) {
   const provider = interaction.options.getString('provider');
   
@@ -1530,7 +1537,6 @@ setInterval(() => {
 }, 3600000); // 1 giờ 1 lần
 
 // ==================== PERIODIC STATS LOG ====================
-// (Giữ nguyên)
 setInterval(() => {
   console.log(`📊 Stats Update:
    - Messages: ${stats.messagesProcessed}
@@ -1544,7 +1550,6 @@ setInterval(() => {
 }, 1800000); // 30 phút
 
 // ==================== ERROR HANDLING ====================
-// (Giữ nguyên)
 client.on('error', (error) => {
   console.error('Discord client error:', error);
   stats.errors++;
@@ -1584,7 +1589,6 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 // ==================== START SERVICES ====================
-// (GiàU nguyên)
 const server = app.listen(WEB_PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════╗
@@ -1616,7 +1620,6 @@ server.on('error', (error) => {
 });
 
 // ==================== HEALTH CHECK PING ====================
-// (Giữ nguyên)
 setInterval(() => {
   axios.get(`http://localhost:${WEB_PORT}/health`)
     .then(() => console.log('💚 Health check passed'))
@@ -1624,7 +1627,6 @@ setInterval(() => {
 }, 300000);
 
 // ==================== EXPORT FOR TESTING ====================
-// (Giữ nguyên)
 module.exports = {
   client,
   stats,
