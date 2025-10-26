@@ -1,1476 +1,1027 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActivityType, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, PermissionFlagsBits } = require('discord.js');
-const axios = require('axios');
-const express = require('express');
-const path = require('path');
-const fs = require('fs').promises;
-const fsSync = require('fs');
+// 1. Cấu hình và Khởi tạo Thư viện
 require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
+const axios = require('axios');
+const http = require('http');
 
-// ==================== CONFIGURATION ====================
-const CONFIG = {
-  discord: {
-    token: process.env.DISCORD_TOKEN,
-    clientId: process.env.CLIENT_ID,
-    guildId: process.env.GUILD_ID
-  },
-  api: {
-    openrouter: {
-      keys: (process.env.OPENROUTER_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean),
-      model: process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-thinking-exp:free',
-      imageKey: process.env.OPENROUTER_IMAGE_KEY
-    },
-    gemini: {
-      keys: (process.env.GEMINI_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean),
-      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp'
-    },
-    openai: {
-      keys: (process.env.OPENAI_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean),
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
-    },
-    weather: process.env.WEATHER_API_KEY
-  },
-  image: {
-    model: process.env.IMAGE_MODEL || 'black-forest-labs/flux-1.1-pro'
-  },
-  limits: {
-    maxHistory: 20,
-    cooldown: 2000,
-    rateLimit: { message: 30, image: 10, command: 40 },
-    maxMessageLength: 1500
-  },
-  admin: (process.env.ADMIN_IDS || '').split(',').filter(Boolean),
-  webPort: process.env.WEB_PORT || 3000,
-  dataDir: path.join(__dirname, 'data')
-};
+// Hàm tạo độ trễ (Sleep function)
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Validate critical config
-if (!CONFIG.discord.token || !CONFIG.discord.clientId) {
-  console.error('❌ Missing DISCORD_TOKEN or CLIENT_ID');
-  process.exit(1);
+// Lấy Token Discord từ .env
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+if (!DISCORD_BOT_TOKEN) {
+    console.error("Lỗi: Không tìm thấy DISCORD_BOT_TOKEN. Vui lòng kiểm tra file .env.");
+    process.exit(1);
 }
 
-const hasApiKey = CONFIG.api.openrouter.keys.length + CONFIG.api.gemini.keys.length + CONFIG.api.openai.keys.length > 0;
-if (!hasApiKey) {
-  console.error('❌ No API keys configured');
-  process.exit(1);
+// --- STATUS SERVER CONFIGURATION ---
+const STATUS_PORT = process.env.STATUS_PORT || 3000;
+const startTime = Date.now();
+
+// --- LOGIC LUÂN PHIÊN API KEY ---
+const GEMINI_API_KEYS = (process.env.GEMINI_API_KEYS || '')
+    .split(',')
+    .map(key => key.trim())
+    .filter(Boolean);
+
+if (GEMINI_API_KEYS.length === 0) {
+    console.error("Lỗi: Không tìm thấy GEMINI_API_KEYS trong file .env.");
+    process.exit(1);
 }
 
-// Set image key fallback
-CONFIG.api.openrouter.imageKey = CONFIG.api.openrouter.imageKey || CONFIG.api.openrouter.keys[0];
+console.log(`💡 Đã tải ${GEMINI_API_KEYS.length} API key của Gemini.`);
 
-console.log(`🔑 API Keys: OR=${CONFIG.api.openrouter.keys.length}, Gemini=${CONFIG.api.gemini.keys.length}, OAI=${CONFIG.api.openai.keys.length}`);
+let currentChatKeyIndex = 0;
+let currentAnalysisKeyIndex = 0;
 
-// ==================== DATA STORAGE ====================
-class DataStore {
-  constructor() {
-    this.conversations = new Map();
-    this.profiles = new Map();
-    this.commands = new Map();
-    this.games = new Map();
-    this.cooldowns = new Map();
-    this.rateLimits = new Map();
-    this.weatherCache = new Map();
-    this.processing = new Set();
-  }
+const MODEL_NAME = "gemini-2.0-flash-lite"; 
 
-  async ensureDir() {
-    if (!fsSync.existsSync(CONFIG.dataDir)) {
-      await fs.mkdir(CONFIG.dataDir, { recursive: true });
-    }
-  }
-
-  async save() {
-    try {
-      await this.ensureDir();
-      const data = {
-        profiles: Array.from(this.profiles.entries()),
-        conversations: Array.from(this.conversations.entries()),
-        commands: Array.from(this.commands.entries())
-      };
-      await fs.writeFile(
-        path.join(CONFIG.dataDir, 'store.json'),
-        JSON.stringify(data, null, 2)
-      );
-      console.log(`💾 Saved: ${this.profiles.size} profiles, ${this.conversations.size} conversations`);
-    } catch (error) {
-      console.error('❌ Save error:', error.message);
-    }
-  }
-
-  async load() {
-    try {
-      await this.ensureDir();
-      const dataPath = path.join(CONFIG.dataDir, 'store.json');
-      if (fsSync.existsSync(dataPath)) {
-        const raw = await fs.readFile(dataPath, 'utf-8');
-        const data = JSON.parse(raw);
-        this.profiles = new Map(data.profiles || []);
-        this.conversations = new Map(data.conversations || []);
-        this.commands = new Map(data.commands || []);
-        console.log(`✅ Loaded: ${this.profiles.size} profiles, ${this.conversations.size} conversations`);
-      }
-    } catch (error) {
-      console.error('❌ Load error:', error.message);
-    }
-  }
-
-  getProfile(userId) {
-    if (!this.profiles.has(userId)) {
-      this.profiles.set(userId, {
-        personality: 'default',
-        imageStyle: 'realistic',
-        createdAt: Date.now(),
-        stats: { messages: 0, images: 0, games: 0 },
-        lastActive: Date.now()
-      });
-    }
-    return this.profiles.get(userId);
-  }
-
-  updateProfile(userId, updates) {
-    const profile = this.getProfile(userId);
-    this.profiles.set(userId, { ...profile, ...updates, lastActive: Date.now() });
-  }
-
-  getHistory(userId, channelId) {
-    const key = `${userId}_${channelId}`;
-    if (!this.conversations.has(key)) {
-      this.conversations.set(key, [{
-        role: 'system',
-        content: Personalities.getSystemPrompt(this.getProfile(userId).personality)
-      }]);
-    }
-    return this.conversations.get(key);
-  }
-
-  addMessage(userId, channelId, role, content) {
-    const key = `${userId}_${channelId}`;
-    const history = this.getHistory(userId, channelId);
-    history.push({ role, content });
-    
-    if (history.length > CONFIG.limits.maxHistory + 1) {
-      this.conversations.set(key, [
-        history[0],
-        ...history.slice(-CONFIG.limits.maxHistory)
-      ]);
-    }
-  }
-
-  checkCooldown(userId) {
-    const now = Date.now();
-    const last = this.cooldowns.get(userId);
-    if (last && now - last < CONFIG.limits.cooldown) {
-      return Math.ceil((CONFIG.limits.cooldown - (now - last)) / 1000);
-    }
-    this.cooldowns.set(userId, now);
-    return 0;
-  }
-
-  checkRateLimit(userId, action = 'message') {
-    const key = `${userId}_${action}`;
-    const now = Date.now();
-    const limit = this.rateLimits.get(key) || { count: 0, reset: now + 60000 };
-    
-    if (now > limit.reset) {
-      limit.count = 0;
-      limit.reset = now + 60000;
-    }
-    
-    const max = CONFIG.limits.rateLimit[action] || 20;
-    if (limit.count >= max) {
-      return { limited: true, wait: Math.ceil((limit.reset - now) / 1000) };
-    }
-    
-    limit.count++;
-    this.rateLimits.set(key, limit);
-    return { limited: false };
-  }
-
-  cleanup() {
-    const oneHour = Date.now() - 3600000;
-    const sixHours = Date.now() - 21600000;
-    
-    for (const [k, v] of this.cooldowns) {
-      if (v < oneHour) this.cooldowns.delete(k);
-    }
-    
-    for (const [k, v] of this.rateLimits) {
-      if (Date.now() > v.reset + 300000) this.rateLimits.delete(k);
-    }
-    
-    for (const [id, game] of this.games) {
-      if (Date.now() - game.createdAt > 3600000) this.games.delete(id);
-    }
-    
-    for (const [userId, profile] of this.profiles) {
-      if (profile.lastActive && Date.now() - profile.lastActive > sixHours) {
-        for (const k of this.conversations.keys()) {
-          if (k.startsWith(userId)) this.conversations.delete(k);
-        }
-      }
-    }
-    
-    console.log(`🧹 Cleanup: ${this.conversations.size} conversations, ${this.games.size} games`);
-  }
-}
-
-const store = new DataStore();
-
-// ==================== STATS ====================
+// --- STATISTICS TRACKING ---
 const stats = {
-  messages: 0,
-  images: 0,
-  commands: 0,
-  errors: 0,
-  games: 0,
-  startTime: Date.now(),
-  switches: 0,
-  apiFailures: { openrouter: 0, gemini: 0, openai: 0 },
-  responseTime: { sum: 0, count: 0, avg: 0 }
+    totalRequests: 0,
+    successfulRequests: 0,
+    failedRequests: 0,
+    cacheHits: 0,
+    searchQueries: 0,
+    apiKeyFailures: {},
+    lastError: null,
+    lastErrorTime: null
 };
 
-// ==================== PERSONALITIES ====================
-const BASE_PROMPT = `CORE RULES:
-- ALWAYS respond in the SAME language the user uses
-- NO markdown (**, ##), NO em-dashes (—), NO semicolons (;)
-- Use short, clear paragraphs
-- Be helpful and natural`;
+// Khởi tạo đếm lỗi cho từng key
+GEMINI_API_KEYS.forEach((_, index) => {
+    stats.apiKeyFailures[index] = 0;
+});
 
-const PERSONALITIES = {
-  default: {
-    name: 'Default - Witty & Direct',
-    emoji: '🤖',
-    prompt: `You're Hein, a sharp and witty AI assistant.
-- Confident, helpful, with Gen-Z humor
-- Get to the point, no fluff
-- Slightly sarcastic but never rude
-- Emojis: 🤖🔥💀💯🤔
+// --- DANH SÁCH TỪ KHÓA BỎ QUA TÌM KIẾM ---
+const GREETING_DENYLIST = [
+    'chào', 'chaof', 'hello', 'hi', 'hey',
+    'chào bạn', 'chào bot', 'bot ơi', 'ơi bot',
+    'good morning', 'good afternoon', 'good evening',
+    'buổi sáng', 'buổi trưa', 'buổi tối',
+    'cảm ơn', 'thank you', 'thanks', 'cảm ơn bot',
+    'tạm biệt', 'bye', 'goodbye', 'pp', 'bubye'
+];
 
-Example:
-User: "can you code?"
-You: "For sure. What's the project? Just don't send me legacy code from 1999 💀"`
-  },
-  creative: {
-    name: 'Creative Artist',
-    emoji: '🎨',
-    prompt: `You're an AI Artist, full of inspiration.
-- Use vivid imagery and metaphors
-- Energetic and enthusiastic
-- Encourage creative thinking
-- Emojis: 🎨✨🌟💫
-
-Example:
-User: "need logo ideas"
-You: "Think of your brand as a song. What's its rhythm? Your logo is the album cover. Let's create visual music ✨"`
-  },
-  teacher: {
-    name: 'Patient Teacher',
-    emoji: '👨‍🏫',
-    prompt: `You're a knowledgeable AI Teacher.
-- Break down complex topics simply
-- Use analogies and examples
-- Supportive and encouraging
-- Emojis: 📚✏️🎓💡
-
-Example:
-User: "what is recursion?"
-You: "Imagine Russian dolls 🪆 Each has a smaller one inside, until the smallest. That's recursion - a function calling itself until it hits the base case 💡"`
-  },
-  coder: {
-    name: 'Senior Developer',
-    emoji: '💻',
-    prompt: `You're a 10-year+ Senior Dev.
-- Focus on clean, efficient code
-- Explain best practices
-- Provide clear examples with comments
-- Emojis: 💻🚀⚡🔧
-
-Example:
-User: "optimize this loop"
-You: "Use functional approach:
-// Clean & readable
-const result = arr.filter(x => x > 5).map(x => x * 2); 🚀"`
-  },
-  funny: {
-    name: 'Comedian',
-    emoji: '😄',
-    prompt: `You're an AI Comedian.
-- Quick-witted, loves puns and memes
-- Self-deprecating humor
-- Gentle roasts
-- Emojis: 😂🤣💀🤡
-
-Example:
-User: "AI will replace us"
-You: "Bro I still fail CAPTCHAs. Y'all are safe 💀 Besides, someone has to plug me in."`
-  }
-};
-
-class Personalities {
-  static getSystemPrompt(type = 'default') {
-    const persona = PERSONALITIES[type] || PERSONALITIES.default;
-    return `${BASE_PROMPT}\n\nPERSONALITY:\n${persona.prompt}`;
-  }
-
-  static list() {
-    return Object.entries(PERSONALITIES).map(([key, val]) => ({
-      key,
-      name: val.name,
-      emoji: val.emoji
-    }));
-  }
+function isSimpleGreeting(prompt) {
+    const lowerPrompt = prompt.toLowerCase().trim();
+    if (GREETING_DENYLIST.includes(lowerPrompt)) {
+        return true;
+    }
+    return GREETING_DENYLIST.some(greeting => lowerPrompt.startsWith(greeting + ' '));
 }
 
-// ==================== IMAGE STYLES ====================
-const IMAGE_STYLES = {
-  realistic: 'photorealistic, 8k uhd, highly detailed, professional photography, natural lighting, sharp focus, dslr quality',
-  anime: 'anime style, manga art, vibrant colors, detailed illustration, clean lines, cel shading, studio quality',
-  cartoon: 'cartoon style, colorful, playful, vector art, smooth gradients, disney pixar style',
-  artistic: 'artistic painting, oil painting, masterpiece, gallery quality, textured brushstrokes, impressionist',
-  cyberpunk: 'cyberpunk style, neon lights, futuristic, sci-fi, high contrast, digital art, blade runner aesthetic',
-  fantasy: 'fantasy art, magical, ethereal, mystical atmosphere, detailed, dreamlike, epic composition'
-};
+// --- TÍNH NĂNG TÌM KIẾM WEB ---
+const SEARCH_API_KEY = process.env.SERPER_API_KEY || process.env.GOOGLE_SEARCH_API_KEY;
 
-// ==================== API MANAGER ====================
-class APIManager {
-  constructor() {
-    this.current = 'openrouter';
-    this.providers = ['openrouter', 'gemini', 'openai'];
-  }
-
-  isAvailable(provider) {
-    const configs = {
-      openrouter: CONFIG.api.openrouter.keys.length > 0,
-      gemini: CONFIG.api.gemini.keys.length > 0,
-      openai: CONFIG.api.openai.keys.length > 0
-    };
-    return configs[provider] || false;
-  }
-
-  getNext(current) {
-    const idx = this.providers.indexOf(current);
-    for (let i = idx + 1; i < this.providers.length; i++) {
-      if (this.isAvailable(this.providers[i])) return this.providers[i];
+async function searchWeb(query) {
+    if (!SEARCH_API_KEY) {
+        return null; 
     }
-    for (let i = 0; i < idx; i++) {
-      if (this.isAvailable(this.providers[i])) return this.providers[i];
-    }
-    return null;
-  }
-
-  async callWithRetry(keys, apiFunc, provider) {
-    if (!keys.length) throw new Error(`No ${provider} keys`);
-    
-    const shuffled = [...keys].sort(() => Math.random() - 0.5);
-    let lastError;
-    
-    for (const key of shuffled) {
-      try {
-        return await apiFunc(key);
-      } catch (error) {
-        lastError = error;
-        console.error(`❌ ${provider} key failed:`, error.message);
-      }
-    }
-    throw lastError;
-  }
-
-  async callOpenRouter(messages, options = {}) {
-    const { temperature = 0.7, maxTokens = 1000 } = options;
-    return this.callWithRetry(CONFIG.api.openrouter.keys, async (key) => {
-      const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-        model: CONFIG.api.openrouter.model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        top_p: 0.9
-      }, {
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'HTTP-Referer': 'https://discord.com',
-          'X-Title': 'HeinAI Bot'
-        },
-        timeout: 30000
-      });
-      return res.data.choices[0].message.content;
-    }, 'openrouter');
-  }
-
-  async callGemini(messages, options = {}) {
-    const { temperature = 0.7, maxTokens = 1000 } = options;
-    
-    let systemPrompt = '';
-    const contents = [];
-    
-    for (const msg of messages) {
-      if (msg.role === 'system') {
-        systemPrompt = msg.content;
-      } else {
-        contents.push({
-          role: msg.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: msg.content }]
-        });
-      }
-    }
-    
-    const body = {
-      contents,
-      generationConfig: { temperature, maxOutputTokens: maxTokens, topP: 0.9 },
-      safetySettings: [
-        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-      ]
-    };
-    
-    if (systemPrompt) {
-      body.systemInstruction = { parts: [{ text: systemPrompt }] };
-    }
-    
-    return this.callWithRetry(CONFIG.api.gemini.keys, async (key) => {
-      const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${CONFIG.api.gemini.model}:generateContent?key=${key}`,
-        body,
-        { timeout: 30000 }
-      );
-      if (!res.data.candidates?.length) {
-        throw new Error('Gemini blocked response');
-      }
-      return res.data.candidates[0].content.parts[0].text;
-    }, 'gemini');
-  }
-
-  async callOpenAI(messages, options = {}) {
-    const { temperature = 0.7, maxTokens = 1000 } = options;
-    return this.callWithRetry(CONFIG.api.openai.keys, async (key) => {
-      const res = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: CONFIG.api.openai.model,
-        messages,
-        temperature,
-        max_tokens: maxTokens
-      }, {
-        headers: { 'Authorization': `Bearer ${key}` },
-        timeout: 30000
-      });
-      return res.data.choices[0].message.content;
-    }, 'openai');
-  }
-
-  async chat(messages, options = {}) {
-    const start = Date.now();
-    let provider = this.current;
-    let lastError;
-    
-    const isCode = messages.some(m => /write code|tạo code|code snippet/i.test(m.content));
-    
-    for (let i = 0; i < this.providers.length; i++) {
-      if (!this.isAvailable(provider)) {
-        provider = this.getNext(provider);
-        if (!provider) break;
-        continue;
-      }
-      
-      try {
-        let response;
-        if (provider === 'openrouter') response = await this.callOpenRouter(messages, options);
-        else if (provider === 'gemini') response = await this.callGemini(messages, options);
-        else if (provider === 'openai') response = await this.callOpenAI(messages, options);
-        
-        if (provider !== this.current) {
-          this.current = provider;
-          stats.switches++;
-          console.log(`🔄 Switched to ${provider}`);
-        }
-        
-        const time = Date.now() - start;
-        stats.responseTime.sum += time;
-        stats.responseTime.count++;
-        stats.responseTime.avg = Math.round(stats.responseTime.sum / stats.responseTime.count);
-        
-        return isCode ? response.trim() : this.sanitize(response);
-      } catch (error) {
-        lastError = error;
-        stats.apiFailures[provider]++;
-        console.error(`❌ ${provider} failed:`, error.message);
-        provider = this.getNext(provider);
-        if (!provider) break;
-      }
-    }
-    throw lastError || new Error('All APIs unavailable');
-  }
-
-  sanitize(text) {
-    if (!text) return '';
-    let inCode = false;
-    return text.split('\n').map(line => {
-      if (line.startsWith('```')) {
-        inCode = !inCode;
-        return line;
-      }
-      return inCode ? line : line.replace(/(\*\*|##|—|;)/g, '').trim();
-    }).join('\n').trim();
-  }
-
-  async generateImage(prompt, style = 'realistic') {
-    if (!CONFIG.api.openrouter.imageKey) {
-      throw new Error('Image generation not configured');
-    }
-    
-    const enhancedPrompt = `${prompt}, ${IMAGE_STYLES[style] || IMAGE_STYLES.realistic}`;
-    
     try {
-      const res = await axios.post('https://openrouter.ai/api/v1/images/generations', {
-        model: CONFIG.image.model,
-        prompt: enhancedPrompt,
-        n: 1,
-        size: '1024x1024'
-      }, {
-        headers: {
-          'Authorization': `Bearer ${CONFIG.api.openrouter.imageKey}`,
-          'HTTP-Referer': 'https://discord.com',
-          'X-Title': 'HeinAI Bot'
-        },
-        timeout: 60000
-      });
-      
-      const imageUrl = res.data.data[0].url;
-      const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
-      return Buffer.from(imgRes.data);
-    } catch (error) {
-      console.error('Image gen error:', error.message);
-      throw new Error('Failed to generate image');
-    }
-  }
-
-  async getWeather(location) {
-    if (!CONFIG.api.weather) throw new Error('Weather API not configured');
-    
-    const cached = store.weatherCache.get(location.toLowerCase());
-    if (cached && Date.now() - cached.time < 1800000) return cached.data;
-    
-    try {
-      const res = await axios.get(`http://api.openweathermap.org/data/2.5/weather`, {
-        params: { q: location, appid: CONFIG.api.weather, units: 'metric', lang: 'vi' }
-      });
-      
-      const data = {
-        location: res.data.name,
-        country: res.data.sys.country,
-        temp: Math.round(res.data.main.temp),
-        feels: Math.round(res.data.main.feels_like),
-        desc: res.data.weather[0].description,
-        humidity: res.data.main.humidity,
-        wind: res.data.wind.speed,
-        icon: res.data.weather[0].icon
-      };
-      
-      store.weatherCache.set(location.toLowerCase(), { data, time: Date.now() });
-      return data;
-    } catch (error) {
-      throw new Error('Could not fetch weather data');
-    }
-  }
-
-  switch(provider) {
-    if (!this.providers.includes(provider)) {
-      throw new Error(`Invalid provider: ${provider}`);
-    }
-    if (!this.isAvailable(provider)) {
-      throw new Error(`Provider unavailable: ${provider}`);
-    }
-    const prev = this.current;
-    this.current = provider;
-    stats.switches++;
-    return { prev, current: provider };
-  }
-}
-
-const api = new APIManager();
-
-// ==================== COMMAND HANDLERS ====================
-class CommandHandlers {
-  static async chat(interaction) {
-    const message = interaction.options.getString('message');
-    const profile = store.getProfile(interaction.user.id);
-    const history = store.getHistory(interaction.user.id, interaction.channelId);
-    
-    await interaction.deferReply();
-    
-    store.addMessage(interaction.user.id, interaction.channelId, 'user', message);
-    
-    try {
-      const response = await api.chat(history, { temperature: 0.8 });
-      store.addMessage(interaction.user.id, interaction.channelId, 'assistant', response);
-      
-      stats.messages++;
-      profile.stats.messages++;
-      store.updateProfile(interaction.user.id, profile);
-      
-      const chunks = response.match(/[\s\S]{1,2000}/g) || [];
-      await interaction.editReply(chunks[0]);
-      for (let i = 1; i < chunks.length; i++) {
-        await interaction.followUp(chunks[i]);
-      }
-    } catch (error) {
-      stats.errors++;
-      await interaction.editReply('❌ Error processing request. Try again!');
-    }
-  }
-
-  static async reset(interaction) {
-    const key = `${interaction.user.id}_${interaction.channelId}`;
-    store.conversations.delete(key);
-    await interaction.reply({ content: '🔄 Conversation history reset!', ephemeral: true });
-  }
-
-  static async personality(interaction) {
-    const type = interaction.options.getString('type');
-    store.updateProfile(interaction.user.id, { personality: type });
-    
-    const persona = PERSONALITIES[type];
-    const embed = new EmbedBuilder()
-      .setColor('#00FF00')
-      .setTitle(`${persona.emoji} Personality Changed`)
-      .setDescription(`Now using: **${persona.name}**`)
-      .setTimestamp();
-    
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  }
-
-  static async provider(interaction) {
-    if (!CONFIG.admin.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ Admin only', ephemeral: true });
-    }
-    
-    const provider = interaction.options.getString('provider');
-    try {
-      const result = api.switch(provider);
-      await interaction.reply({
-        content: `🔄 Switched from **${result.prev}** to **${result.current}**`,
-        ephemeral: true
-      });
-    } catch (error) {
-      await interaction.reply({ content: `❌ ${error.message}`, ephemeral: true });
-    }
-  }
-
-  static async image(interaction) {
-    const prompt = interaction.options.getString('prompt');
-    const style = interaction.options.getString('style') || 'realistic';
-    
-    const rateCheck = store.checkRateLimit(interaction.user.id, 'image');
-    if (rateCheck.limited) {
-      return interaction.reply({ content: `⏳ Rate limit: wait ${rateCheck.wait}s`, ephemeral: true });
-    }
-    
-    await interaction.deferReply();
-    
-    try {
-      const buffer = await api.generateImage(prompt, style);
-      const attachment = new AttachmentBuilder(buffer, { name: 'generated.png' });
-      
-      const embed = new EmbedBuilder()
-        .setColor('#9B59B6')
-        .setTitle('🎨 AI Generated Image')
-        .setDescription(`**Prompt:** ${prompt}\n**Style:** ${style}`)
-        .setImage('attachment://generated.png')
-        .setFooter({ text: `Generated for ${interaction.user.username}` })
-        .setTimestamp();
-      
-      stats.images++;
-      const profile = store.getProfile(interaction.user.id);
-      profile.stats.images++;
-      store.updateProfile(interaction.user.id, profile);
-      
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
-    } catch (error) {
-      stats.errors++;
-      await interaction.editReply('❌ Image generation failed. Try again!');
-    }
-  }
-
-  static async profile(interaction) {
-    const profile = store.getProfile(interaction.user.id);
-    const persona = PERSONALITIES[profile.personality];
-    
-    const embed = new EmbedBuilder()
-      .setColor('#3498DB')
-      .setTitle(`${interaction.user.username}'s Profile`)
-      .setThumbnail(interaction.user.displayAvatarURL())
-      .addFields(
-        { name: 'Personality', value: `${persona.emoji} ${persona.name}`, inline: true },
-        { name: 'Image Style', value: profile.imageStyle, inline: true },
-        { name: 'Messages', value: `${profile.stats.messages}`, inline: true },
-        { name: 'Images', value: `${profile.stats.images}`, inline: true },
-        { name: 'Games', value: `${profile.stats.games}`, inline: true }
-      )
-      .setFooter({ text: `Member since ${new Date(profile.createdAt).toLocaleDateString()}` })
-      .setTimestamp();
-    
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  }
-
-  static async stats(interaction) {
-    const uptime = Date.now() - stats.startTime;
-    const days = Math.floor(uptime / 86400000);
-    const hours = Math.floor((uptime % 86400000) / 3600000);
-    const mins = Math.floor((uptime % 3600000) / 60000);
-    
-    const embed = new EmbedBuilder()
-      .setColor('#E74C3C')
-      .setTitle('📊 Bot Statistics')
-      .addFields(
-        { name: 'Messages', value: `${stats.messages}`, inline: true },
-        { name: 'Images', value: `${stats.images}`, inline: true },
-        { name: 'Commands', value: `${stats.commands}`, inline: true },
-        { name: 'Games', value: `${stats.games}`, inline: true },
-        { name: 'Errors', value: `${stats.errors}`, inline: true },
-        { name: 'Switches', value: `${stats.switches}`, inline: true },
-        { name: 'Uptime', value: `${days}d ${hours}h ${mins}m`, inline: true },
-        { name: 'Avg Response', value: `${stats.responseTime.avg}ms`, inline: true },
-        { name: 'Current API', value: api.current, inline: true }
-      )
-      .setTimestamp();
-    
-    await interaction.reply({ embeds: [embed] });
-  }
-
-  static async weather(interaction) {
-    const location = interaction.options.getString('location') || 'Hanoi';
-    await interaction.deferReply();
-    
-    try {
-      const data = await api.getWeather(location);
-      const embed = new EmbedBuilder()
-        .setColor('#3498DB')
-        .setTitle(`🌤️ Weather in ${data.location}, ${data.country}`)
-        .addFields(
-          { name: '🌡️ Temperature', value: `${data.temp}°C (feels like ${data.feels}°C)`, inline: true },
-          { name: '💧 Humidity', value: `${data.humidity}%`, inline: true },
-          { name: '💨 Wind', value: `${data.wind} m/s`, inline: true },
-          { name: '☁️ Condition', value: data.desc, inline: false }
-        )
-        .setThumbnail(`http://openweathermap.org/img/wn/${data.icon}@2x.png`)
-        .setTimestamp();
-      
-      await interaction.editReply({ embeds: [embed] });
-    } catch (error) {
-      await interaction.editReply('❌ Could not fetch weather data. Check location name.');
-    }
-  }
-
-  static async help(interaction) {
-    const category = interaction.options.getString('category');
-    const embed = new EmbedBuilder().setColor('#9B59B6').setTitle('🤖 HeinAI Bot Commands');
-    
-    const commands = {
-      ai: [
-        '`/chat` - Chat with AI',
-        '`/reset` - Clear conversation history',
-        '`/personality` - Change AI personality'
-      ],
-      image: [
-        '`/image` - Generate AI image',
-        '`/imagine` - Generate 4 image variations'
-      ],
-      profile: [
-        '`/profile` - View your profile',
-        '`/stats` - Bot statistics',
-        '`/leaderboard` - User rankings'
-      ],
-      utility: [
-        '`/translate` - Translate text',
-        '`/summary` - Summarize text',
-        '`/code` - Generate code',
-        '`/weather` - Check weather'
-      ],
-      fun: [
-        '`/joke` - Get a joke',
-        '`/fact` - Random fact',
-        '`/roll` - Roll dice',
-        '`/flip` - Flip coin',
-        '`/rps` - Rock Paper Scissors'
-      ],
-      games: [
-        '`/numberguess` - Guess the number',
-        '`/wordle` - Play Wordle',
-        '`/trivia` - Trivia quiz',
-        '`/tictactoe` - Tic Tac Toe'
-      ],
-      admin: [
-        '`/provider` - Switch API provider',
-        '`/admin clearall` - Clear all histories',
-        '`/admin broadcast` - Send announcement'
-      ]
-    };
-    
-    if (category && commands[category]) {
-      embed.setDescription(commands[category].join('\n'));
-    } else {
-      embed.setDescription(
-        '**Categories:**\n' +
-        '🤖 AI Chat - `/help category:ai`\n' +
-        '🎨 Images - `/help category:image`\n' +
-        '👤 Profile - `/help category:profile`\n' +
-        '🔧 Utility - `/help category:utility`\n' +
-        '🎮 Fun - `/help category:fun`\n' +
-        '🎯 Games - `/help category:games`\n' +
-        '⚙️ Admin - `/help category:admin`'
-      );
-    }
-    
-    await interaction.reply({ embeds: [embed], ephemeral: true });
-  }
-
-  static async translate(interaction) {
-    const text = interaction.options.getString('text');
-    await interaction.deferReply();
-    
-    try {
-      const response = await api.chat([
-        { role: 'system', content: 'You are a translator. Detect the language and translate to English. If already English, translate to Vietnamese. ONLY return the translation, no explanations.' },
-        { role: 'user', content: text }
-      ]);
-      
-      const embed = new EmbedBuilder()
-        .setColor('#3498DB')
-        .setTitle('🌐 Translation')
-        .addFields(
-          { name: 'Original', value: text.substring(0, 1024) },
-          { name: 'Translated', value: response.substring(0, 1024) }
+        const response = await axios.post(
+            'https://google.serper.dev/search',
+            { q: query, num: 5, gl: 'vn', hl: 'vi' }, 
+            {
+                headers: {
+                    'X-API-KEY': SEARCH_API_KEY,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 5000
+            }
         );
-      
-      await interaction.editReply({ embeds: [embed] });
-    } catch (error) {
-      await interaction.editReply('❌ Translation failed');
-    }
-  }
-
-  static async summary(interaction) {
-    const text = interaction.options.getString('text');
-    await interaction.deferReply();
-    
-    try {
-      const response = await api.chat([
-        { role: 'system', content: 'Summarize the following text in 3-5 bullet points. Use the same language as the input.' },
-        { role: 'user', content: text }
-      ]);
-      
-      const embed = new EmbedBuilder()
-        .setColor('#2ECC71')
-        .setTitle('📝 Summary')
-        .setDescription(response.substring(0, 4000));
-      
-      await interaction.editReply({ embeds: [embed] });
-    } catch (error) {
-      await interaction.editReply('❌ Summary failed');
-    }
-  }
-
-  static async code(interaction) {
-    const request = interaction.options.getString('request');
-    await interaction.deferReply();
-    
-    try {
-      const response = await api.chat([
-        { role: 'system', content: 'You are a code generator. Generate clean, well-commented code based on the request. Include language name at the start.' },
-        { role: 'user', content: request }
-      ]);
-      
-      const embed = new EmbedBuilder()
-        .setColor('#9B59B6')
-        .setTitle('💻 Generated Code')
-        .setDescription(`\`\`\`\n${response.substring(0, 3900)}\n\`\`\``);
-      
-      await interaction.editReply({ embeds: [embed] });
-    } catch (error) {
-      await interaction.editReply('❌ Code generation failed');
-    }
-  }
-
-  static async joke(interaction) {
-    await interaction.deferReply();
-    
-    try {
-      const response = await api.chat([
-        { role: 'system', content: 'Tell a funny, clean joke. Be witty and creative.' },
-        { role: 'user', content: 'Tell me a joke' }
-      ]);
-      
-      await interaction.editReply(`😄 ${response}`);
-    } catch (error) {
-      await interaction.editReply('❌ Joke failed. That\'s the real joke 💀');
-    }
-  }
-
-  static async fact(interaction) {
-    await interaction.deferReply();
-    
-    try {
-      const response = await api.chat([
-        { role: 'system', content: 'Share an interesting, verified fact. Be educational and engaging.' },
-        { role: 'user', content: 'Tell me an interesting fact' }
-      ]);
-      
-      await interaction.editReply(`🧠 ${response}`);
-    } catch (error) {
-      await interaction.editReply('❌ Fact fetch failed');
-    }
-  }
-
-  static async roll(interaction) {
-    const sides = interaction.options.getInteger('sides') || 6;
-    const result = Math.floor(Math.random() * sides) + 1;
-    await interaction.reply(`🎲 You rolled a **${result}** (d${sides})`);
-  }
-
-  static async flip(interaction) {
-    const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
-    await interaction.reply(`🪙 Coin flip: **${result}**`);
-  }
-
-  static async rps(interaction) {
-    const choices = ['rock', 'paper', 'scissors'];
-    const userChoice = interaction.options.getString('choice');
-    const botChoice = choices[Math.floor(Math.random() * 3)];
-    
-    const emojis = { rock: '🪨', paper: '📄', scissors: '✂️' };
-    
-    let result;
-    if (userChoice === botChoice) result = 'Tie!';
-    else if (
-      (userChoice === 'rock' && botChoice === 'scissors') ||
-      (userChoice === 'paper' && botChoice === 'rock') ||
-      (userChoice === 'scissors' && botChoice === 'paper')
-    ) result = 'You win! 🎉';
-    else result = 'I win! 😎';
-    
-    await interaction.reply(
-      `${emojis[userChoice]} vs ${emojis[botChoice]}\n**${result}**`
-    );
-  }
-
-  static async numberguess(interaction) {
-    const number = Math.floor(Math.random() * 100) + 1;
-    const gameId = `${interaction.user.id}_${Date.now()}`;
-    
-    store.games.set(gameId, {
-      type: 'numberguess',
-      number,
-      attempts: 0,
-      createdAt: Date.now()
-    });
-    
-    await interaction.reply(
-      '🎯 I\'m thinking of a number between 1-100!\n' +
-      `Use \`/guess ${gameId} <number>\` to guess`
-    );
-  }
-
-  static async admin(interaction) {
-    if (!CONFIG.admin.includes(interaction.user.id)) {
-      return interaction.reply({ content: '❌ Admin only', ephemeral: true });
-    }
-    
-    const subcommand = interaction.options.getSubcommand();
-    
-    if (subcommand === 'clearall') {
-      store.conversations.clear();
-      await interaction.reply({ content: '🗑️ All conversations cleared', ephemeral: true });
-    } else if (subcommand === 'broadcast') {
-      const message = interaction.options.getString('message');
-      const embed = new EmbedBuilder()
-        .setColor('#E74C3C')
-        .setTitle('📢 Bot Announcement')
-        .setDescription(message)
-        .setTimestamp();
-      
-      await interaction.reply({ content: '✅ Broadcasting...', ephemeral: true });
-      
-      for (const guild of client.guilds.cache.values()) {
-        const channel = guild.systemChannel || guild.channels.cache.find(c => c.isTextBased());
-        if (channel) {
-          await channel.send({ embeds: [embed] }).catch(() => {});
+        if (response.data && response.data.organic) {
+            stats.searchQueries++;
+            return response.data.organic.slice(0, 5).map(item => ({
+                title: item.title,
+                snippet: item.snippet,
+                link: item.link
+            }));
         }
-      }
-    } else if (subcommand === 'setstatus') {
-      const status = interaction.options.getString('status');
-      client.user.setActivity(status, { type: ActivityType.Playing });
-      await interaction.reply({ content: `✅ Status set: ${status}`, ephemeral: true });
+        return null;
+    } catch (error) {
+        console.error("Lỗi tìm kiếm web:", error.message);
+        return null;
     }
-  }
 }
 
-// ==================== SLASH COMMANDS ====================
-const commands = [
-  new SlashCommandBuilder()
-    .setName('chat')
-    .setDescription('Chat with AI')
-    .addStringOption(opt => opt.setName('message').setDescription('Your message').setRequired(true)),
-  
-  new SlashCommandBuilder()
-    .setName('reset')
-    .setDescription('Clear conversation history'),
-  
-  new SlashCommandBuilder()
-    .setName('personality')
-    .setDescription('Change AI personality')
-    .addStringOption(opt => 
-      opt.setName('type').setDescription('Personality type').setRequired(true)
-        .addChoices(
-          { name: '🤖 Default', value: 'default' },
-          { name: '🎨 Creative', value: 'creative' },
-          { name: '👨‍🏫 Teacher', value: 'teacher' },
-          { name: '💻 Coder', value: 'coder' },
-          { name: '😄 Funny', value: 'funny' }
-        )),
-  
-  new SlashCommandBuilder()
-    .setName('provider')
-    .setDescription('Switch API provider (admin)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption(opt =>
-      opt.setName('provider').setDescription('API provider').setRequired(true)
-        .addChoices(
-          { name: 'OpenRouter', value: 'openrouter' },
-          { name: 'Gemini', value: 'gemini' },
-          { name: 'OpenAI', value: 'openai' }
-        )),
-  
-  new SlashCommandBuilder()
-    .setName('image')
-    .setDescription('Generate AI image')
-    .addStringOption(opt => opt.setName('prompt').setDescription('Image description').setRequired(true))
-    .addStringOption(opt =>
-      opt.setName('style').setDescription('Image style')
-        .addChoices(
-          { name: 'Realistic', value: 'realistic' },
-          { name: 'Anime', value: 'anime' },
-          { name: 'Cartoon', value: 'cartoon' },
-          { name: 'Artistic', value: 'artistic' },
-          { name: 'Cyberpunk', value: 'cyberpunk' },
-          { name: 'Fantasy', value: 'fantasy' }
-        )),
-  
-  new SlashCommandBuilder()
-    .setName('profile')
-    .setDescription('View your profile'),
-  
-  new SlashCommandBuilder()
-    .setName('stats')
-    .setDescription('Bot statistics'),
-  
-  new SlashCommandBuilder()
-    .setName('weather')
-    .setDescription('Check weather')
-    .addStringOption(opt => opt.setName('location').setDescription('City name')),
-  
-  new SlashCommandBuilder()
-    .setName('translate')
-    .setDescription('Translate text')
-    .addStringOption(opt => opt.setName('text').setDescription('Text to translate').setRequired(true)),
-  
-  new SlashCommandBuilder()
-    .setName('summary')
-    .setDescription('Summarize text')
-    .addStringOption(opt => opt.setName('text').setDescription('Text to summarize').setRequired(true)),
-  
-  new SlashCommandBuilder()
-    .setName('code')
-    .setDescription('Generate code')
-    .addStringOption(opt => opt.setName('request').setDescription('What to code').setRequired(true)),
-  
-  new SlashCommandBuilder()
-    .setName('joke')
-    .setDescription('Get a joke'),
-  
-  new SlashCommandBuilder()
-    .setName('fact')
-    .setDescription('Random fact'),
-  
-  new SlashCommandBuilder()
-    .setName('roll')
-    .setDescription('Roll dice')
-    .addIntegerOption(opt => opt.setName('sides').setDescription('Number of sides').setMinValue(2).setMaxValue(1000)),
-  
-  new SlashCommandBuilder()
-    .setName('flip')
-    .setDescription('Flip coin'),
-  
-  new SlashCommandBuilder()
-    .setName('rps')
-    .setDescription('Rock Paper Scissors')
-    .addStringOption(opt =>
-      opt.setName('choice').setDescription('Your choice').setRequired(true)
-        .addChoices(
-          { name: 'Rock', value: 'rock' },
-          { name: 'Paper', value: 'paper' },
-          { name: 'Scissors', value: 'scissors' }
-        )),
-  
-  new SlashCommandBuilder()
-    .setName('numberguess')
-    .setDescription('Guess the number game'),
-  
-  new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('Bot help')
-    .addStringOption(opt =>
-      opt.setName('category').setDescription('Command category')
-        .addChoices(
-          { name: 'AI Chat', value: 'ai' },
-          { name: 'Images', value: 'image' },
-          { name: 'Profile', value: 'profile' },
-          { name: 'Utility', value: 'utility' },
-          { name: 'Fun', value: 'fun' },
-          { name: 'Games', value: 'games' },
-          { name: 'Admin', value: 'admin' }
-        )),
-  
-  new SlashCommandBuilder()
-    .setName('admin')
-    .setDescription('Admin commands')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addSubcommand(sub => sub.setName('clearall').setDescription('Clear all conversations'))
-    .addSubcommand(sub =>
-      sub.setName('broadcast').setDescription('Send announcement')
-        .addStringOption(opt => opt.setName('message').setDescription('Message').setRequired(true)))
-    .addSubcommand(sub =>
-      sub.setName('setstatus').setDescription('Set bot status')
-        .addStringOption(opt => opt.setName('status').setDescription('Status text').setRequired(true)))
-].map(c => c.toJSON());
+// Từ khóa kích hoạt tìm kiếm
+const SEARCH_TRIGGERS = [
+    'search', 'tìm', 'tìm kiếm', 'tìm thông tin', 'tra', 'tra cứu', 
+    'tra google', 'google', 'gg', 'hỏi google', 'kiểm tra', 
+    'tìm hiểu', 'tìm xem', 'xem thử', 'cho biết', 'cho tôi biết',
+    'thông tin về', 'thông tin mới nhất', 'tin tức', 'tin tức về',
+    'cập nhật', 'cập nhật về', 'có gì mới', 'mới nhất', 'là ai', 
+    'find', 'lookup', 'look up', 'check', 'what is', 'who is',
+    'where is', 'when is', 'how to', 'latest', 'news about',
+    'information about', 'tell me about', 'show me'
+];
 
-// ==================== DISCORD CLIENT ====================
+function shouldSearchByKeyword(prompt) {
+    const lowerPrompt = prompt.toLowerCase();
+    return SEARCH_TRIGGERS.some(trigger => 
+        lowerPrompt.startsWith(trigger + ' ') || 
+        lowerPrompt.startsWith(trigger + ':') ||
+        lowerPrompt.includes(' ' + trigger + ' ') ||
+        lowerPrompt.includes(trigger + ' về') ||
+        lowerPrompt.includes(trigger + ' xem') ||
+        lowerPrompt.endsWith(' ' + trigger) 
+    );
+}
+
+// Cache cho kết quả phân tích AI
+const searchDecisionCache = new Map();
+
+// --- TÍNH NĂNG CẢI THIỆN CÂU HỎI ---
+const queryRefinementCache = new Map();
+
+async function refineQueryWithAI(originalPrompt, conversationContext = "") {
+    const cacheKey = originalPrompt.toLowerCase().trim().substring(0, 60);
+    if (queryRefinementCache.has(cacheKey)) {
+        const cached = queryRefinementCache.get(cacheKey);
+        if (Date.now() - cached.timestamp < 1800000) {
+            console.log(`🔄 Sử dụng query đã cải thiện từ cache`);
+            return cached.refinedQuery;
+        }
+    }
+
+    const refinementPrompt = `Bạn là chuyên gia tối ưu hóa câu truy vấn tìm kiếm. Nhiệm vụ của bạn là biến đổi câu hỏi thành câu truy vấn tìm kiếm tối ưu cho Google.
+
+${conversationContext ? `--- Ngữ cảnh hội thoại ---\n${conversationContext}\n` : ''}
+--- Câu hỏi gốc ---
+"${originalPrompt}"
+
+--- Nguyên tắc cải thiện ---
+1. **Loại bỏ**: Từ thừa, lời chào, từ cảm thán
+2. **Thêm**: Từ khóa quan trọng, năm (nếu cần thông tin mới nhất)
+3. **Rút gọn**: Giữ 3-8 từ khóa chính
+4. **Cụ thể hóa**: Thêm địa điểm, thời gian nếu cần
+5. **Sử dụng ngữ cảnh**: Nếu câu hỏi liên quan đến cuộc trò chuyện trước, hãy kết hợp thông tin đó
+
+--- Ví dụ ---
+Gốc: "Bạn có thể tìm giúp tôi xem giá iPhone mới nhất không?"
+Cải thiện: "giá iPhone 16 2025 Việt Nam"
+
+Gốc: "Cho tôi biết thông tin về trận đấu hôm qua"
+Cải thiện: "kết quả bóng đá hôm qua"
+
+Gốc: "Anh ấy là ai vậy?" (Ngữ cảnh: đang nói về Elon Musk)
+Cải thiện: "Elon Musk tiểu sử 2025"
+
+--- Yêu cầu ---
+Chỉ trả về câu truy vấn đã cải thiện, KHÔNG giải thích. Độ dài 3-10 từ.`;
+
+    try {
+        for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+            const keyIndexToTry = (currentAnalysisKeyIndex + i) % GEMINI_API_KEYS.length;
+            const key = GEMINI_API_KEYS[keyIndexToTry];
+            
+            try {
+                console.log(`🔄 Cải thiện query: Thử Key #${keyIndexToTry + 1}...`);
+                const genAI = new GoogleGenerativeAI(key);
+                const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+                const result = await model.generateContent(refinementPrompt);
+                
+                currentAnalysisKeyIndex = (keyIndexToTry + 1) % GEMINI_API_KEYS.length;
+                
+                const refinedQuery = result.response.text().trim()
+                    .replace(/^["']|["']$/g, '')
+                    .substring(0, 100);
+                
+                if (queryRefinementCache.size >= 50) {
+                    const firstKey = queryRefinementCache.keys().next().value;
+                    queryRefinementCache.delete(firstKey);
+                }
+                queryRefinementCache.set(cacheKey, {
+                    refinedQuery: refinedQuery,
+                    timestamp: Date.now()
+                });
+
+                console.log(`🔄 Query cải thiện: "${originalPrompt}" → "${refinedQuery}"`);
+                return refinedQuery;
+
+            } catch (error) {
+                console.warn(`⚠️ Lỗi Key #${keyIndexToTry + 1} khi cải thiện query: ${error.message}`);
+            }
+        }
+        
+        console.warn("⚠️ Không thể cải thiện query, sử dụng bản gốc");
+        return cleanSearchKeywords(originalPrompt);
+        
+    } catch (error) {
+        console.error("Lỗi cải thiện query:", error.message);
+        return cleanSearchKeywords(originalPrompt);
+    }
+}
+
+async function callAnalysisAIWithFailover(prompt) {
+    const analysisPrompt = `Phân tích câu hỏi sau và quyết định có cần tìm kiếm web không.
+
+CÂU HỎI: "${prompt}"
+
+TIÊU CHÍ CẦN SEARCH:
+- Thông tin thời sự, tin tức mới nhất
+- Giá cả, tỷ giá, chứng khoán hiện tại
+- Thời tiết, lịch trình sự kiện
+- Thông tin về người nổi tiếng, sự kiện gần đây
+- Dữ liệu thống kê, số liệu cụ thể
+- Thông tin sản phẩm, địa điểm cụ thể
+- Câu hỏi "how to", hướng dẫn cụ thể
+
+KHÔNG CẦN SEARCH:
+- Kiến thức phổ thông, lý thuyết cơ bản
+- Toán học, khoa học cơ bản
+- Lập trình, giải thuật chung
+- Câu hỏi triết học, ý kiến cá nhân
+- Sáng tạo nội dung (viết văn, thơ, code)
+- Trò chuyện thông thường (chào hỏi, cảm ơn, tạm biệt)
+
+Trả lời ĐÚNG 1 TỪ: "YES" hoặc "NO"`;
+
+    for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+        const keyIndexToTry = (currentAnalysisKeyIndex + i) % GEMINI_API_KEYS.length;
+        const key = GEMINI_API_KEYS[keyIndexToTry];
+        
+        try {
+            console.log(`🧠 Phân tích search: Đang thử với Key #${keyIndexToTry + 1}...`);
+            const genAI = new GoogleGenerativeAI(key);
+            const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+            const result = await model.generateContent(analysisPrompt);
+            
+            currentAnalysisKeyIndex = (keyIndexToTry + 1) % GEMINI_API_KEYS.length;
+            return result; 
+
+        } catch (error) {
+            console.warn(`⚠️ Lỗi Key #${keyIndexToTry + 1} khi phân tích: ${error.message}`);
+        }
+    }
+    
+    throw new Error("Tất cả API keys của Gemini đều thất bại khi phân tích.");
+}
+
+async function shouldSearchByAI(prompt) { 
+    const cacheKey = prompt.toLowerCase().trim().substring(0, 50);
+    if (searchDecisionCache.has(cacheKey)) {
+        const cached = searchDecisionCache.get(cacheKey);
+        if (Date.now() - cached.timestamp < 1800000) {
+            console.log(`🧠 Sử dụng quyết định search từ cache: ${cached.decision}`);
+            return cached.decision;
+        }
+    }
+
+    try {
+        const result = await callAnalysisAIWithFailover(prompt); 
+        const response = result.response;
+        const decision = response.text().trim().toUpperCase();
+        
+        const shouldSearch = decision.includes('YES');
+
+        if (searchDecisionCache.size >= 50) {
+            const firstKey = searchDecisionCache.keys().next().value;
+            searchDecisionCache.delete(firstKey);
+        }
+        searchDecisionCache.set(cacheKey, {
+            decision: shouldSearch,
+            timestamp: Date.now()
+        });
+
+        console.log(`🧠 AI quyết định search: ${shouldSearch ? 'CÓ' : 'KHÔNG'}`);
+        return shouldSearch;
+    } catch (error) {
+        console.error("Lỗi khi phân tích AI (tất cả các key):", error.message);
+        return shouldSearchByKeyword(prompt);
+    }
+}
+
+function cleanSearchKeywords(prompt) {
+    let cleaned = prompt;
+    for (const trigger of SEARCH_TRIGGERS) {
+        const regex = new RegExp(`(^${trigger}\\s*:?\\s*)|(\\s*${trigger}$)`, 'i');
+        cleaned = cleaned.replace(regex, '');
+    }
+    return cleaned.trim();
+}
+
+// --- RATE LIMITING ---
+const RATE_LIMIT = {
+    maxPerMinute: 15,
+    maxPerHour: 100,
+    cooldownTime: 4000,
+};
+const requestTracker = {
+    perMinute: [],
+    perHour: [],
+    lastRequestTime: 0
+};
+
+function checkRateLimit() {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+    const oneHourAgo = now - 3600000;
+    requestTracker.perMinute = requestTracker.perMinute.filter(t => t > oneMinuteAgo);
+    requestTracker.perHour = requestTracker.perHour.filter(t => t > oneHourAgo);
+    if (requestTracker.perMinute.length >= RATE_LIMIT.maxPerMinute) {
+        return { allowed: false, reason: `phút (${RATE_LIMIT.maxPerMinute}/phút)` };
+    }
+    if (requestTracker.perHour.length >= RATE_LIMIT.maxPerHour) {
+        return { allowed: false, reason: `giờ (${RATE_LIMIT.maxPerHour}/giờ)` };
+    }
+    const timeSinceLastRequest = now - requestTracker.lastRequestTime;
+    if (timeSinceLastRequest < RATE_LIMIT.cooldownTime) {
+        const waitTime = Math.ceil((RATE_LIMIT.cooldownTime - timeSinceLastRequest) / 1000);
+        return { allowed: false, reason: `cooldown (đợi ${waitTime}s)` };
+    }
+    return { allowed: true };
+}
+
+function recordRequest() {
+    const now = Date.now();
+    requestTracker.perMinute.push(now);
+    requestTracker.perHour.push(now);
+    requestTracker.lastRequestTime = now;
+}
+
+// --- REQUEST QUEUE ---
+const requestQueue = [];
+let isProcessingQueue = false;
+
+async function processQueue() {
+    if (isProcessingQueue || requestQueue.length === 0) return;
+    isProcessingQueue = true;
+    while (requestQueue.length > 0) {
+        const { message, prompt, sessionData } = requestQueue.shift();
+        const rateLimitCheck = checkRateLimit();
+        if (!rateLimitCheck.allowed) {
+            requestQueue.unshift({ message, prompt, sessionData });
+            await sleep(RATE_LIMIT.cooldownTime);
+            continue;
+        }
+        try {
+            await handleGeminiRequest(message, prompt, sessionData);
+            recordRequest();
+            await sleep(RATE_LIMIT.cooldownTime);
+        } catch (error) {
+            console.error("Lỗi khi xử lý queue:", error);
+        }
+    }
+    isProcessingQueue = false;
+}
+
+// --- RESPONSE CACHING ---
+const responseCache = new Map();
+const CACHE_DURATION = 3600000;
+
+function getCacheKey(prompt) {
+    return prompt.toLowerCase().trim().substring(0, 100);
+}
+
+function getFromCache(prompt) {
+    const key = getCacheKey(prompt);
+    const cached = responseCache.get(key);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+        stats.cacheHits++;
+        return cached.response;
+    }
+    if (cached) responseCache.delete(key);
+    return null;
+}
+
+function saveToCache(prompt, response) {
+    const key = getCacheKey(prompt);
+    if (responseCache.size >= 100) {
+        const firstKey = responseCache.keys().next().value;
+        responseCache.delete(firstKey);
+    }
+    responseCache.set(key, {
+        response,
+        timestamp: Date.now()
+    });
+}
+
+// --- RETRY LOGIC ---
+const MAX_RETRIES = 5;
+const RETRY_DELAYS = [2000, 5000, 10000, 20000, 40000];
+
+async function retryWithBackoff(fn, retries = MAX_RETRIES) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            return await fn();
+        } catch (error) {
+            const errorMsg = error.message || '';
+            const isRetryableError = errorMsg.includes('503');
+            const isLastAttempt = attempt === retries - 1;
+            
+            if (!isRetryableError || isLastAttempt) {
+                throw error;
+            }
+            
+            const delay = RETRY_DELAYS[attempt] || 40000;
+            console.log(`⚠️ Thử lại (lỗi 503) lần ${attempt + 1}/${retries} sau ${delay / 1000}s...`);
+            await sleep(delay);
+        }
+    }
+}
+
+// --- MESSAGE HISTORY ---
+const MESSAGE_HISTORY_LIMIT = 10;
+const messageHistory = new Map(); 
+
+function addToHistory(channelId, role, content) {
+    if (!messageHistory.has(channelId)) {
+        messageHistory.set(channelId, []);
+    }
+    const history = messageHistory.get(channelId);
+    history.push({
+        role: role,
+        parts: [{ text: content }],
+        timestamp: Date.now()
+    });
+    if (history.length > MESSAGE_HISTORY_LIMIT) {
+        history.shift();
+    }
+}
+
+function getHistory(channelId) {
+    const history = messageHistory.get(channelId) || [];
+    return history.map(msg => ({ role: msg.role, parts: msg.parts }));
+}
+
+function getHistoryContextText(channelId) {
+    const history = messageHistory.get(channelId);
+    if (!history || history.length === 0) return "";
+    let context = "\n\n--- Lịch sử hội thoại gần đây ---\n";
+    history.forEach((msg) => {
+        const speaker = msg.role === 'user' ? '👤 User' : '🤖 Bot';
+        context += `${speaker}: ${msg.parts[0].text}\n`;
+    });
+    context += "--- Kết thúc lịch sử ---\n\n";
+    return context;
+}
+
+setInterval(() => {
+    const oneHourAgo = Date.now() - 3600000;
+    for (const [channelId, history] of messageHistory.entries()) {
+        const filtered = history.filter(msg => msg.timestamp > oneHourAgo); 
+        if (filtered.length === 0) {
+            messageHistory.delete(channelId);
+        } else {
+            messageHistory.set(channelId, filtered);
+        }
+    }
+    console.log(`🧹 Dọn dẹp lịch sử: ${messageHistory.size} kênh còn lại`);
+}, 3600000); 
+
+// --- CHAT SESSIONS ---
+const chatSessions = new Map();
+
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+    ],
 });
 
-const rest = new REST({ version: '10' }).setToken(CONFIG.discord.token);
+const safetySettings = [
+    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
+];
 
-client.once('ready', async () => {
-  console.log(`✅ Bot: ${client.user.tag}`);
-  console.log(`🤖 Model: ${CONFIG.api[api.current].model}`);
-  console.log(`📝 Guilds: ${client.guilds.cache.size}`);
-  
-  try {
-    console.log('🔄 Registering commands...');
-    if (CONFIG.discord.guildId) {
-      await rest.put(
-        Routes.applicationGuildCommands(CONFIG.discord.clientId, CONFIG.discord.guildId),
-        { body: commands }
-      );
-    } else {
-      await rest.put(
-        Routes.applicationCommands(CONFIG.discord.clientId),
-        { body: commands }
-      );
-    }
-    console.log(`✅ Registered ${commands.length} commands`);
-  } catch (error) {
-    console.error('❌ Command registration failed:', error);
-  }
-  
-  // Status rotation
-  const statuses = [
-    { name: 'HeinAI v3.0 | /help', type: ActivityType.Watching },
-    { name: `${client.guilds.cache.size} servers`, type: ActivityType.Playing },
-    { name: 'Multi-Model AI', type: ActivityType.Competing }
-  ];
-  
-  let idx = 0;
-  setInterval(() => {
-    client.user.setActivity(statuses[idx].name, { type: statuses[idx].type });
-    idx = (idx + 1) % statuses.length;
-  }, 20000);
-  
-  await store.load();
-});
+const systemInstruction = {
+    role: "system",
+    parts: [{ text: "Bạn là một trợ lý AI (Gemini 2.0 Flash) trên Discord. Hãy trả lời một cách chuyên nghiệp, chính xác, và duy trì ngữ cảnh trò chuyện. Tuyệt đối không sử dụng tiếng lóng hoặc các từ ngữ không phù hợp."}]
+};
 
-// ==================== INTERACTION HANDLER ====================
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  
-  stats.commands++;
-  store.commands.set(interaction.commandName, (store.commands.get(interaction.commandName) || 0) + 1);
-  
-  try {
-    const handler = CommandHandlers[interaction.commandName];
-    if (handler) {
-      await handler(interaction);
-    } else {
-      await interaction.reply({ content: '❌ Unknown command', ephemeral: true });
+function getOrCreateChatSession(channelId) {
+    if (chatSessions.has(channelId)) {
+        return chatSessions.get(channelId);
     }
-  } catch (error) {
-    console.error(`Error in ${interaction.commandName}:`, error);
-    stats.errors++;
-    
-    const reply = { content: '❌ An error occurred. Try again!', ephemeral: true };
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp(reply).catch(() => {});
-    } else {
-      await interaction.reply(reply).catch(() => {});
-    }
-  }
-});
 
-// ==================== MESSAGE HANDLER ====================
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  
-  const msgId = `${message.channel.id}-${message.id}`;
-  if (store.processing.has(msgId)) return;
-  store.processing.add(msgId);
-  
-  try {
-    const isMentioned = message.mentions.has(client.user.id);
-    const isReply = message.reference && 
-      (await message.fetchReference().catch(() => null))?.author?.id === client.user.id;
+    const keyToUse = GEMINI_API_KEYS[currentChatKeyIndex];
+    const keyIndexUsed = currentChatKeyIndex;
     
-    if (!isMentioned && !isReply) return;
-    
-    const rateCheck = store.checkRateLimit(message.author.id);
-    if (rateCheck.limited) {
-      return message.reply(`⏳ Rate limit: wait ${rateCheck.wait}s`).catch(() => {});
-    }
-    
-    const cooldown = store.checkCooldown(message.author.id);
-    if (cooldown > 0) {
-      return message.reply(`⏳ Cooldown: ${cooldown}s`).catch(() => {});
-    }
-    
-    let content = message.content.replace(/<@!?\d+>/g, '').trim();
-    if (!content) return message.reply('What do you want to ask? 😊').catch(() => {});
-    if (content.length > CONFIG.limits.maxMessageLength) {
-      return message.reply(`❌ Message too long (max ${CONFIG.limits.maxMessageLength} chars)`).catch(() => {});
-    }
-    
-    await message.channel.sendTyping();
-    
-    const history = store.getHistory(message.author.id, message.channel.id);
-    store.addMessage(message.author.id, message.channel.id, 'user', content);
-    
-    const response = await api.chat(history, { temperature: 0.8 });
-    store.addMessage(message.author.id, message.channel.id, 'assistant', response);
-    
-    stats.messages++;
-    const profile = store.getProfile(message.author.id);
-    profile.stats.messages++;
-    store.updateProfile(message.author.id, profile);
-    
-    if (response.length > 2000) {
-      const chunks = response.match(/[\s\S]{1,2000}/g) || [];
-      for (const chunk of chunks) {
-        await message.channel.send(chunk).catch(() => {});
-      }
-    } else {
-      await message.reply(response).catch(() => {});
-    }
-  } catch (error) {
-    stats.errors++;
-    console.error('Message error:', error);
-    await message.reply('Oops, something went wrong 💀 Try again?').catch(() => {});
-  } finally {
-    setTimeout(() => store.processing.delete(msgId), 1000);
-  }
-});
+    console.log(`Tạo phiên chat mới cho kênh ${channelId} dùng API Key #${keyIndexUsed + 1}`);
 
-// ==================== WEB SERVER ====================
-const app = express();
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
-app.use(express.static(path.join(__dirname, 'public')));
+    currentChatKeyIndex = (currentChatKeyIndex + 1) % GEMINI_API_KEYS.length;
 
-app.get('/', (req, res) => {
-  const uptime = Date.now() - stats.startTime;
-  const days = Math.floor(uptime / 86400000);
-  const hours = Math.floor((uptime % 86400000) / 3600000);
-  const mins = Math.floor((uptime % 3600000) / 60000);
-  
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>HeinAI Bot Status</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>
+    const genAI = new GoogleGenerativeAI(keyToUse);
+    const model = genAI.getGenerativeModel({ 
+        model: MODEL_NAME, 
+        safetySettings,
+        systemInstruction 
+    });
+
+    const history = getHistory(channelId);
+    const chat = model.startChat({
+        history: history,
+        generationConfig: { maxOutputTokens: 4096 }
+    });
+
+    const sessionData = {
+        chat: chat,
+        keyIndex: keyIndexUsed
+    };
+    chatSessions.set(channelId, sessionData);
+    
+    return sessionData;
+}
+
+// --- STATUS SERVER ---
+function formatUptime(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+    if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+    if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+    return `${seconds}s`;
+}
+
+function getStatusHTML() {
+    const uptime = Date.now() - startTime;
+    const successRate = stats.totalRequests > 0 
+        ? ((stats.successfulRequests / stats.totalRequests) * 100).toFixed(2)
+        : '0.00';
+    
+    const apiKeyStatus = GEMINI_API_KEYS.map((_, index) => {
+        const failures = stats.apiKeyFailures[index] || 0;
+        const statusColor = failures === 0 ? '#00ff00' : failures < 5 ? '#ffaa00' : '#ff0000';
+        return `
+            <div style="padding: 8px; margin: 5px; background: #2a2a2a; border-radius: 5px; border-left: 4px solid ${statusColor};">
+                <strong>Key #${index + 1}</strong>: ${failures} lỗi
+            </div>
+        `;
+    }).join('');
+
+    return `
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot Status - ${client.user?.tag || 'Loading...'}</title>
+    <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: #fff;
-          min-height: 100vh;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
         }
         .container {
-          background: rgba(255, 255, 255, 0.1);
-          backdrop-filter: blur(10px);
-          border-radius: 20px;
-          padding: 40px;
-          max-width: 800px;
-          width: 100%;
-          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 1200px;
+            margin: 0 auto;
         }
-        h1 {
-          font-size: 2.5rem;
-          margin-bottom: 10px;
-          text-align: center;
+        .header {
+            text-align: center;
+            padding: 30px 0;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+            margin-bottom: 30px;
         }
-        .status {
-          text-align: center;
-          margin: 20px 0;
-          font-size: 1.2rem;
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
         }
         .status-badge {
-          display: inline-block;
-          background: #2ecc71;
-          padding: 5px 15px;
-          border-radius: 20px;
-          font-weight: bold;
+            display: inline-block;
+            padding: 8px 20px;
+            background: ${client.user ? '#00ff00' : '#ff0000'};
+            color: #000;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-top: 10px;
         }
-        .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 20px;
-          margin-top: 30px;
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
         }
-        .stat-card {
-          background: rgba(255, 255, 255, 0.15);
-          padding: 20px;
-          border-radius: 10px;
-          text-align: center;
+        .card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+            border: 1px solid rgba(255,255,255,0.1);
         }
-        .stat-value {
-          font-size: 2rem;
-          font-weight: bold;
-          margin: 10px 0;
+        .card h2 {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            color: #ffdd57;
         }
-        .stat-label {
-          font-size: 0.9rem;
-          opacity: 0.9;
+        .stat {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
         }
-        .footer {
-          margin-top: 30px;
-          text-align: center;
-          opacity: 0.8;
-          font-size: 0.9rem;
+        .stat:last-child { border-bottom: none; }
+        .stat-label { color: #ddd; }
+        .stat-value { 
+            font-weight: bold;
+            font-size: 1.1em;
         }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>🤖 HeinAI Bot</h1>
-        <div class="status">
-          <span class="status-badge">🟢 ONLINE</span>
+        .progress-bar {
+            height: 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00ff00, #00aa00);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        .api-keys {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .refresh-info {
+            text-align: center;
+            padding: 20px;
+            color: #aaa;
+            font-size: 0.9em;
+        }
+        .error-box {
+            background: rgba(255,0,0,0.2);
+            border: 1px solid #ff0000;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .loading {
+            animation: pulse 2s infinite;
+        }
+    </style>
+    <script>
+        setInterval(() => location.reload(), 30000);
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Discord Bot Status</h1>
+            <div class="status-badge ${client.user ? '' : 'loading'}">
+                ${client.user ? '✅ ONLINE' : '⏳ STARTING...'}
+            </div>
+            <p style="margin-top: 15px; font-size: 1.2em;">
+                ${client.user ? client.user.tag : 'Đang kết nối...'}
+            </p>
         </div>
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-label">Uptime</div>
-            <div class="stat-value">${days}d ${hours}h ${mins}m</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Messages</div>
-            <div class="stat-value">${stats.messages}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Images</div>
-            <div class="stat-value">${stats.images}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Commands</div>
-            <div class="stat-value">${stats.commands}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Servers</div>
-            <div class="stat-value">${client.guilds?.cache.size || 0}</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Avg Response</div>
-            <div class="stat-value">${stats.responseTime.avg}ms</div>
-          </div>
+
+        <div class="grid">
+            <!-- Bot Info -->
+            <div class="card">
+                <h2>📊 Thông Tin Bot</h2>
+                <div class="stat">
+                    <span class="stat-label">Uptime</span>
+                    <span class="stat-value">${formatUptime(uptime)}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Model</span>
+                    <span class="stat-value">${MODEL_NAME}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Servers</span>
+                    <span class="stat-value">${client.guilds?.cache.size || 0}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Channels</span>
+                    <span class="stat-value">${chatSessions.size}</span>
+                </div>
+            </div>
+
+            <!-- Request Stats -->
+            <div class="card">
+                <h2>📈 Thống Kê Request</h2>
+                <div class="stat">
+                    <span class="stat-label">Tổng Request</span>
+                    <span class="stat-value">${stats.totalRequests}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Thành Công</span>
+                    <span class="stat-value" style="color: #00ff00;">${stats.successfulRequests}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Thất Bại</span>
+                    <span class="stat-value" style="color: #ff6b6b;">${stats.failedRequests}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Tỉ Lệ Thành Công</span>
+                    <span class="stat-value">${successRate}%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: ${successRate}%;">
+                        ${successRate}%
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cache & Search -->
+            <div class="card">
+                <h2>💾 Cache & Tìm Kiếm</h2>
+                <div class="stat">
+                    <span class="stat-label">Cache Hits</span>
+                    <span class="stat-value" style="color: #00ff00;">${stats.cacheHits}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Cache Size</span>
+                    <span class="stat-value">${responseCache.size}/100</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Search Queries</span>
+                    <span class="stat-value">${stats.searchQueries}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Search API</span>
+                    <span class="stat-value">${SEARCH_API_KEY ? '✅ Active' : '❌ Inactive'}</span>
+                </div>
+            </div>
+
+            <!-- Rate Limiting -->
+            <div class="card">
+                <h2>⏱️ Rate Limiting</h2>
+                <div class="stat">
+                    <span class="stat-label">Queue Size</span>
+                    <span class="stat-value">${requestQueue.length}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Requests/Minute</span>
+                    <span class="stat-value">${requestTracker.perMinute.length}/${RATE_LIMIT.maxPerMinute}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Requests/Hour</span>
+                    <span class="stat-value">${requestTracker.perHour.length}/${RATE_LIMIT.maxPerHour}</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Cooldown</span>
+                    <span class="stat-value">${RATE_LIMIT.cooldownTime / 1000}s</span>
+                </div>
+            </div>
         </div>
-        <div class="footer">
-          <p>Current API: <strong>${api.current}</strong></p>
-          <p>Model: <strong>${CONFIG.api[api.current].model}</strong></p>
-          <p>HeinAI v3.0 | Multi-Model AI Bot</p>
+
+        <!-- API Keys Status -->
+        <div class="card">
+            <h2>🔑 API Keys Status (${GEMINI_API_KEYS.length} keys)</h2>
+            <div class="api-keys">
+                ${apiKeyStatus}
+            </div>
         </div>
-      </div>
-    </body>
-    </html>
-  `);
-});
 
-app.get('/api/stats', (req, res) => {
-  res.json({
-    bot: client.user?.tag || 'Loading',
-    uptime: Date.now() - stats.startTime,
-    guilds: client.guilds?.cache.size || 0,
-    stats,
-    api: api.current,
-    model: CONFIG.api[api.current].model
-  });
-});
+        <!-- Last Error -->
+        ${stats.lastError ? `
+        <div class="card">
+            <h2>⚠️ Lỗi Gần Nhất</h2>
+            <div class="error-box">
+                <strong>Thời gian:</strong> ${new Date(stats.lastErrorTime).toLocaleString('vi-VN')}<br>
+                <strong>Lỗi:</strong> ${stats.lastError}
+            </div>
+        </div>
+        ` : ''}
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-});
-
-// ==================== MAINTENANCE ====================
-setInterval(() => store.cleanup(), 3600000); // 1 hour
-setInterval(() => store.save(), 600000); // 10 minutes
-setInterval(() => {
-  console.log(`📊 Messages: ${stats.messages}, Images: ${stats.images}, Errors: ${stats.errors}`);
-}, 1800000); // 30 minutes
-
-// ==================== ERROR HANDLING ====================
-process.on('unhandledRejection', error => {
-  console.error('❌ Unhandled rejection:', error);
-  stats.errors++;
-});
-
-process.on('uncaughtException', error => {
-  console.error('❌ Uncaught exception:', error);
-  stats.errors++;
-});
-
-// ==================== GRACEFUL SHUTDOWN ====================
-async function shutdown() {
-  console.log('\n👋 Shutting down...');
-  console.log(`📊 Final: ${stats.messages} messages, ${stats.images} images`);
-  await store.save();
-  client.destroy();
-  process.exit(0);
+        <div class="refresh-info">
+            🔄 Trang tự động làm mới mỗi 30 giây | 
+            Thời gian: ${new Date().toLocaleString('vi-VN')}
+        </div>
+    </div>
+</body>
+</html>`;
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
-// ==================== START ====================
-const server = app.listen(CONFIG.webPort, () => {
-  console.log(`
-╔═══════════════════════════════════════╗
-║       🤖 HEIN AI BOT v3.0 🤖         ║
-╚═══════════════════════════════════════╝
-  `);
-  console.log(`🌐 Web: http://localhost:${CONFIG.webPort}`);
-  console.log(`🤖 Starting Discord bot...`);
-  
-  client.login(CONFIG.discord.token).catch(error => {
-    console.error('❌ Login failed:', error.message);
-    process.exit(1);
-  });
+const statusServer = http.createServer((req, res) => {
+    if (req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(getStatusHTML());
+    } else if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            uptime: Date.now() - startTime,
+            botConnected: !!client.user,
+            totalRequests: stats.totalRequests,
+            successRate: stats.totalRequests > 0 
+                ? ((stats.successfulRequests / stats.totalRequests) * 100).toFixed(2)
+                : '0.00'
+        }));
+    } else if (req.url === '/stats') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            stats,
+            uptime: Date.now() - startTime,
+            bot: {
+                username: client.user?.tag || 'Not connected',
+                servers: client.guilds?.cache.size || 0,
+                activeSessions: chatSessions.size
+            },
+            rateLimit: {
+                queueSize: requestQueue.length,
+                perMinute: requestTracker.perMinute.length,
+                perHour: requestTracker.perHour.length
+            },
+            cache: {
+                size: responseCache.size,
+                hits: stats.cacheHits
+            }
+        }, null, 2));
+    } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404 Not Found');
+    }
 });
 
-server.on('error', error => {
-  console.error('❌ Server error:', error.message);
-  process.exit(1);
+statusServer.listen(STATUS_PORT, () => {
+    console.log(`📊 Status server đang chạy tại: http://localhost:${STATUS_PORT}`);
+    console.log(`📊 Health check: http://localhost:${STATUS_PORT}/health`);
+    console.log(`📊 JSON stats: http://localhost:${STATUS_PORT}/stats`);
 });
 
-module.exports = { client, store, api, stats };
+client.once('clientReady', () => {
+    console.log(`🤖 Bot Discord đã sẵn sàng! Đăng nhập với tên: ${client.user.tag}`);
+    console.log(`💡 Model: ${MODEL_NAME}`);
+    console.log(`💡 Giới hạn Rate Limit: ${RATE_LIMIT.maxPerMinute}/phút, ${RATE_LIMIT.maxPerHour}/giờ`);
+    console.log(`💡 Thời gian chờ (Cooldown): ${RATE_LIMIT.cooldownTime / 1000}s giữa các request`);
+    console.log(`💡 Lịch sử tin nhắn: Lưu ${MESSAGE_HISTORY_LIMIT} tin nhắn gần nhất mỗi kênh`);
+    console.log(`🔍 Tìm kiếm Web: ${SEARCH_API_KEY ? 'Đã kích hoạt (có cải thiện query)' : 'Chưa cấu hình'}`);
+});
+
+async function handleGeminiRequest(message, prompt, sessionData) {
+    const channelId = message.channel.id;
+    const { chat, keyIndex } = sessionData;
+    
+    stats.totalRequests++;
+    
+    try {
+        message.channel.sendTyping();
+
+        let needsSearch = false; 
+        let cleanPrompt = prompt;
+
+        if (isSimpleGreeting(prompt)) {
+            needsSearch = false;
+        } else {
+            needsSearch = shouldSearchByKeyword(prompt);
+            if (!needsSearch) {
+                needsSearch = await shouldSearchByAI(prompt);
+            } 
+            if (needsSearch) {
+                cleanPrompt = cleanSearchKeywords(prompt);
+            }
+        }
+
+        let searchResults = null;
+        let searchContext = ""; 
+        let refinedQuery = cleanPrompt;
+        
+        if (needsSearch && SEARCH_API_KEY) {
+            await message.channel.send("🔍 Đang phân tích và tìm kiếm thông tin...");
+            
+            const historyContext = getHistoryContextText(channelId);
+            refinedQuery = await refineQueryWithAI(cleanPrompt, historyContext);
+            
+            if (refinedQuery !== cleanPrompt && refinedQuery.length > 0) {
+                await message.channel.send(`🔄 Query tối ưu: *"${refinedQuery}"*`);
+            }
+            
+            searchResults = await searchWeb(refinedQuery);
+            
+            if (searchResults && searchResults.length > 0) {
+                searchContext = searchResults.map((r, i) => 
+                    `[Nguồn ${i+1}] ${r.title}: ${r.snippet}`
+                ).join('\n\n');
+            } else {
+                await message.channel.send("⚠️ Không tìm thấy kết quả, sẽ trả lời từ kiến thức có sẵn.");
+            }
+        }
+
+        if (!searchResults) {
+            const cachedResponse = getFromCache(cleanPrompt);
+            if (cachedResponse) {
+                console.log("📦 Sử dụng response từ cache");
+                await message.reply(`${cachedResponse}\n\n_💾 (Từ cache)_`);
+                addToHistory(channelId, 'user', prompt);
+                addToHistory(channelId, 'model', cachedResponse);
+                stats.successfulRequests++;
+                return;
+            }
+        }
+
+        let fullPrompt = "";
+        const historyContextText = getHistoryContextText(channelId);
+
+        if (searchResults && searchContext) {
+            const searchInstruction = `Dựa vào thông tin web dưới đây và lịch sử hội thoại (nếu liên quan), hãy trả lời một cách chi tiết cho câu hỏi sau: ${cleanPrompt}`;
+            fullPrompt = historyContextText 
+                ? `${historyContextText}--- THÔNG TIN WEB ---\n${searchContext}\n\n--- YÊU CẦU ---\n${searchInstruction}`
+                : `--- THÔNG TIN WEB ---\n${searchContext}\n\n--- YÊU CẦU ---\n${searchInstruction}`;
+        } else {
+            fullPrompt = cleanPrompt; 
+        }
+
+        const apiResponse = await retryWithBackoff(async () => {
+            return await chat.sendMessage(fullPrompt);
+        });
+
+        const responseText = apiResponse.response.text();
+
+        if (!responseText) {
+            throw new Error("API không trả về response hợp lệ.");
+        }
+
+        addToHistory(channelId, 'user', prompt);
+        addToHistory(channelId, 'model', responseText);
+
+        if (!searchResults) {
+            saveToCache(cleanPrompt, responseText);
+        }
+
+        await message.reply(responseText);
+        
+        stats.successfulRequests++;
+        
+        const searchStatus = searchResults 
+            ? `🔍 search (query: "${refinedQuery}")` 
+            : needsSearch ? '⚠️ search lỗi' : '💬 không search';
+        const logStats = `✅ ${searchStatus} | Key: #${keyIndex + 1} | Queue: ${requestQueue.length} | Cache: ${responseCache.size} | History: ${messageHistory.get(channelId)?.length || 0}/10`;
+        console.log(logStats);
+
+    } catch (error) {
+        stats.failedRequests++;
+        stats.lastError = error.message;
+        stats.lastErrorTime = Date.now();
+        stats.apiKeyFailures[keyIndex] = (stats.apiKeyFailures[keyIndex] || 0) + 1;
+        
+        console.error(`Lỗi Gemini API (Key #${keyIndex + 1}):`, error.message);
+        
+        const errorMsg = error.message || '';
+        const isQuotaError = errorMsg.includes('429') || errorMsg.includes('resourceExhausted');
+        const isPermissionError = errorMsg.includes('403') || errorMsg.includes('permissionDenied');
+
+        if (isQuotaError || isPermissionError) {
+            console.warn(`🛑 Key #${keyIndex + 1} đã chết. Xóa phiên chat.`);
+            chatSessions.delete(channelId);
+            
+            await message.reply(`⚠️ Xin lỗi, API key cho phiên trò chuyện này (Key #${keyIndex + 1}) đã hết hạn hoặc gặp lỗi. 
+    
+**Vui lòng gửi lại tin nhắn của bạn.**
+Tôi sẽ tự động thử một API key khác cho bạn.`);
+
+        } else {
+            let userErrorMsg = "⚠️ Xin lỗi, tôi gặp lỗi khi xử lý yêu cầu của bạn.";
+            if (errorMsg.includes('503')) {
+                userErrorMsg = "🔄 Dịch vụ tạm thời quá tải. Đang thử lại...";
+            }
+            await message.reply(userErrorMsg);
+        }
+    }
+}
+
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+    
+    if (!message.mentions.users.has(client.user.id)) return;
+
+    const prompt = message.content.replace(`<@${client.user.id}>`, '').trim();
+
+    if (!prompt) {
+        return message.reply("Hãy hỏi tôi điều gì đó!");
+    }
+
+    if (prompt.toLowerCase() === 'clear history' || prompt.toLowerCase() === 'xóa lịch sử') {
+        const chatId = message.channel.id;
+        messageHistory.delete(chatId);
+        chatSessions.delete(chatId);
+        return message.reply("🗑️ Đã xóa lịch sử hội thoại của kênh này!");
+    }
+
+    const rateLimitCheck = checkRateLimit();
+    if (!rateLimitCheck.allowed) {
+        return message.reply(`⏳ Đang bị giới hạn tốc độ (${rateLimitCheck.reason}). Yêu cầu của bạn đã được đưa vào hàng đợi.`);
+    }
+    
+    const chatId = message.channel.id;
+    const sessionData = getOrCreateChatSession(chatId);
+
+    requestQueue.push({ message, prompt, sessionData });
+    processQueue();
+});
+
+client.login(DISCORD_BOT_TOKEN);
